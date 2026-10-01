@@ -398,37 +398,118 @@ describe("drag and drop", () => {
     assert.deepEqual(adds(sb.take()), [{ method: "workspace.group.add", params: { group_id: "gA", workspace_id: "x" } }]);
   });
 
-  test("dropping a header moves its whole top-level tree, whichever header was grabbed", () => {
-    const state = () => {
-      const t = tree3();
-      return {
-        workspaces: workspaces(...t.workspaces, { id: "z", title: "Z", group: "gZ" }),
-        groups: [...t.groups, group("gZ", "Z", "z")],
-      };
-    };
-    const expected = JSON.stringify(["x", "z", "a", "a1", "b", "b1", "c", "c1"]);
-    for (const [key, index] of [["h:g:gA", 2], ["h:g:gB", 4]]) {
-      const sb = mountSidebar(state());
-      sb.drop(key, index, { block: true });
-      assert.deepEqual(sb.take(), [{ method: "workspace.reorder_many", params: { workspace_ids: expected } }], key);
-    }
-  });
-
-  test("a subgroup header drag moving the tree up lands where the tree's first row goes", () => {
+  test("a top-level group dropped under another group's header nests into it with its subtree", () => {
     const t = tree3();
     const sb = mountSidebar({
-      workspaces: workspaces({ id: "x", title: "loose" }, { id: "z", title: "Z", group: "gZ" }, ...t.workspaces.filter((w) => w.id !== "x")),
-      groups: [...t.groups, group("gZ", "Z", "z")],
+      workspaces: workspaces(
+        ...t.workspaces,
+        { id: "z", title: "Z", group: "gZ" },
+        { id: "z1", title: "zed", group: "gZ" },
+        { id: "y", title: "Z/Y", group: "gY" },
+        { id: "y1", title: "y-one", group: "gY" },
+      ),
+      groups: [...t.groups, group("gZ", "Z", "z"), group("gY", "Z/Y", "y")],
     });
-    // Grabbing B (2 rows into the A block) and dropping the tree at the top puts B at slot 2.
-    sb.drop("h:g:gB", 2, { block: true });
-    assert.deepEqual(sb.take(), [{
-      method: "workspace.reorder_many",
-      params: { workspace_ids: JSON.stringify(["a", "a1", "b", "b1", "c", "c1", "x", "z"]) },
-    }]);
+    // Without Z's header: [A, a-one, B, ...]; slot 1 sits right under A.
+    sb.drop("h:g:gZ", 1);
+    assert.deepEqual(sb.take(), [
+      { method: "workspace.group.rename", params: { group_id: "gZ", name: "A/Z" } },
+      { method: "workspace.group.rename", params: { group_id: "gY", name: "A/Z/Y" } },
+      // Z's tabs land after A's own run, never splitting it.
+      { method: "workspace.reorder_many", params: { workspace_ids: JSON.stringify(["a", "a1", "z", "z1", "y", "y1", "b", "b1", "c", "c1", "x"]) } },
+    ]);
+    // Painted at once, before the host echoes.
+    assert.deepEqual(sb.outline(), [
+      "A", "  a-one", "  Z", "    zed", "    Y", "      y-one", "  B", "    b-one", "    C", "      c-one", "loose",
+    ]);
   });
 
-  test("a tree drag keeps every group's tabs contiguous", () => {
+  test("a subgroup dragged to the top leaves its parent and takes its subtree along", () => {
+    const sb = mountSidebar(tree3());
+    sb.drop("h:g:gB", 0);
+    assert.deepEqual(sb.take(), [
+      { method: "workspace.group.rename", params: { group_id: "gB", name: "B" } },
+      { method: "workspace.group.rename", params: { group_id: "gC", name: "B/C" } },
+      { method: "workspace.reorder_many", params: { workspace_ids: JSON.stringify(["b", "b1", "c", "c1", "a", "a1", "x"]) } },
+    ]);
+    assert.deepEqual(sb.outline(), ["B", "  b-one", "  C", "    c-one", "A", "  a-one", "loose"]);
+  });
+
+  test("at a group's end the pointer side decides between staying in and moving out", () => {
+    // Without C's header: [A, a-one, B, b-one, c-one, loose]; slot 5 follows C's own row.
+    const out = mountSidebar(tree3());
+    out.drop("h:g:gC", 5, { side: "below" });
+    assert.deepEqual(out.take(), [{ method: "workspace.group.rename", params: { group_id: "gC", name: "C" } }]);
+    const stay = mountSidebar(tree3());
+    stay.drop("h:g:gC", 5, { side: "above" });
+    assert.deepEqual(stay.take(), []);
+  });
+
+  test("a group dropped inside its own subtree stays put", () => {
+    const sb = mountSidebar(tree3());
+    sb.drop("h:g:gA", 2); // right under B, A's own subgroup
+    assert.deepEqual(sb.take(), []);
+  });
+
+  test("a group dragged above its own virtual parent lands there, not at the end of the tabs", () => {
+    const sb = mountSidebar({
+      workspaces: workspaces(
+        { id: "x", title: "loose" },
+        { id: "b", title: "Work/Backend", group: "gB" },
+        { id: "b1", title: "api", group: "gB" },
+        { id: "f", title: "Work/Frontend", group: "gF" },
+        { id: "f1", title: "web", group: "gF" },
+        { id: "y", title: "tail" },
+      ),
+      groups: [group("gB", "Work/Backend", "b"), group("gF", "Work/Frontend", "f")],
+    });
+    assert.deepEqual(sb.outline(), ["loose", "Work", "  Backend", "    api", "  Frontend", "    web", "tail"]);
+    sb.drop("h:g:gB", 1); // between loose and Work
+    // Backend's tabs already come first, so only the un-nesting rename is sent.
+    assert.deepEqual(sb.take(), [{ method: "workspace.group.rename", params: { group_id: "gB", name: "Backend" } }]);
+    assert.deepEqual(sb.outline(), ["loose", "Backend", "  api", "Work", "  Frontend", "    web", "tail"]);
+  });
+
+  test("dragging a group back before cmux echoes the first move still sends the second", () => {
+    const state = {
+      workspaces: workspaces(
+        { id: "a", title: "A", group: "gA" },
+        { id: "a1", title: "a-one", group: "gA" },
+        { id: "x", title: "loose" },
+        { id: "d", title: "D", group: "gD" },
+        { id: "d1", title: "d-one", group: "gD" },
+        { id: "y", title: "loose2" },
+      ),
+      groups: [group("gA", "A", "a"), group("gD", "D", "d")],
+    };
+    const sb = mountSidebar(state);
+    const original = sb.outline();
+    sb.drop("h:g:gD", 0); // to the top
+    sb.take();
+    sb.drop("h:g:gD", 4); // back between loose and loose2, before any echo
+    assert.deepEqual(sb.take(), [
+      { method: "workspace.reorder_many", params: { workspace_ids: JSON.stringify(["a", "a1", "x", "d", "d1", "y"]) } },
+    ]);
+    assert.deepEqual(sb.outline(), original);
+  });
+
+  test("releasing a header in its own slot changes nothing", () => {
+    // A/Z's tabs come before A's anchor, so Z displays first under A.
+    const sb = mountSidebar({
+      workspaces: workspaces(
+        { id: "z", title: "A/Z", group: "gZ" },
+        { id: "z1", title: "zed", group: "gZ" },
+        { id: "a", title: "A", group: "gA" },
+        { id: "a1", title: "a-one", group: "gA" },
+        { id: "x", title: "loose" },
+      ),
+      groups: [group("gZ", "A/Z", "z"), group("gA", "A", "a")],
+    });
+    sb.drop("h:g:gZ", 1);
+    assert.deepEqual(sb.take(), []);
+  });
+
+  test("a group drag keeps every group's tabs contiguous", () => {
     // A/Z sits before A in the tabs, so it displays above A's own member.
     const sb = mountSidebar({
       workspaces: workspaces(
@@ -441,7 +522,7 @@ describe("drag and drop", () => {
       groups: [group("gZ", "A/Z", "z"), group("gA", "A", "a")],
     });
     assert.deepEqual(sb.outline(), ["A", "  Z", "    zed", "  a-one", "loose"]);
-    sb.drop("h:g:gA", 1, { block: true }); // below loose
+    sb.drop("h:g:gA", 4); // below loose
     assert.deepEqual(sb.take(), [{
       method: "workspace.reorder_many",
       params: { workspace_ids: JSON.stringify(["x", "a", "a1", "z", "z1"]) },

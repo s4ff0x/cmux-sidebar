@@ -155,7 +155,6 @@ export function mountSidebar(state) {
         return findDeep(n.id, (x) => x.type === "image" && x.props.systemName === "bookmark.fill", { skipHidden: true })
           .some((x) => x.props.width !== 0 && x.props.color === "#FF453A");
       },
-      header: n.props.fixed === true,
       // The selected (or multi-selected) row paints a resting background.
       highlighted: !!n.props.background,
       texts: visibleTexts,

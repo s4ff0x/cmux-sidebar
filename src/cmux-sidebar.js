@@ -1,18 +1,20 @@
 // cmux-sidebar: nested workspace groups, working/finished agent dots, collapse
-// that keeps active work visible, and per-workspace border colors.
+// that keeps active work visible, and Active/Favorites filters.
 //
 // Forked from manaflow-ai/cmux Examples/CustomSidebars/workspaces.js. The
 // whole sidebar is ONE flat drag surface: group headers and workspace rows
-// live in a single Reorderable. Headers are `fixed` (not grabbable, but they
-// shift to open gaps like any row), so a workspace can be dragged between
-// groups, into a group, or out to the ungrouped area in one gesture. The drop
-// resolves to (container group, reorder anchor) from the flat index and
-// dispatches workspace.group.add/remove + workspace.reorder.
+// live in a single Reorderable, and every row drags on its own. A workspace
+// can be dragged between groups, into a group, or out to the ungrouped area
+// in one gesture; a header drag re-parents and reorders its whole subtree.
+// The drop resolves to (container, reorder anchor) from the flat index and
+// the boundary side, and dispatches the group edits plus the reorder.
 //
 // Group collapse is optimistic (a local signal flips instantly) and syncs via
 // workspace.group.collapse/expand so the built-in sidebar agrees.
 //
-// Install: ./install.sh (symlinks into ~/.config/cmux/sidebars/).
+// Install: https://github.com/s4ff0x/cmux-sidebar#install
+// SPDX-License-Identifier: GPL-3.0-or-later (derived from cmux's
+// Examples/CustomSidebars/workspaces.js, Copyright Manaflow, Inc.)
 
 // --- change-only data ------------------------------------------------------------
 // The runtime never dedupes: a binding re-runs and re-sends its prop whenever
@@ -46,7 +48,22 @@ function memoJSON(fn) {
 }
 
 const wsList = memoJSON(() => data.workspaces() ?? []);
-const groupsList = memoJSON(() => data.groups() ?? []);
+// Optimistic group names: a path edit (rename, re-parent) reshapes the tree
+// the same frame; each override clears once the data agrees.
+const nameOverride = new Map();
+const [nameTick, setNameTick] = signal(0);
+const groupsList = memoJSON(() => {
+  nameTick();
+  return (data.groups() ?? []).map((g) => {
+    if (!nameOverride.has(g.id)) return g;
+    const name = nameOverride.get(g.id);
+    if (name === g.name) {
+      nameOverride.delete(g.id); // caught up
+      return g;
+    }
+    return { ...g, name };
+  });
+});
 const selectedId = memo(() => data.selectedId() ?? "");
 const groupsById = computed(() => new Map(groupsList().map((g) => [g.id, g])));
 const groupById = (id) => groupsById().get(id);
@@ -499,7 +516,10 @@ function groupsBelow(node) {
 
 function renameGroup(g, segs) {
   const name = joinPath(segs);
-  if (name && name !== g.name) cmux("workspace.group.rename", { group_id: g.id, name });
+  if (!name || name === g.name) return;
+  nameOverride.set(g.id, name);
+  setNameTick(nameTick() + 1);
+  cmux("workspace.group.rename", { group_id: g.id, name });
 }
 
 // `segs` if no other group/header already uses that path, else the leaf gets
@@ -590,7 +610,7 @@ function keyed(entries) {
   return entries;
 }
 
-function wsEntry(id, editing, depth, container, block, crumb, collapsedUnder = null) {
+function wsEntry(id, editing, depth, container, crumb, collapsedUnder = null) {
   return {
     kind: "ws",
     id: id + (editing === id ? ":edit" : ""),
@@ -598,21 +618,19 @@ function wsEntry(id, editing, depth, container, block, crumb, collapsedUnder = n
     editing: editing === id,
     container,
     depth,
-    block,
     crumb,
     collapsedUnder,
   };
 }
 
-// One flat entry list (headers + rows) for the single Reorderable. Pinned
-// top-level groups and pinned ungrouped workspaces float to the top. Every
-// entry of a top-level tree shares one drag `block`, so a header drag moves
-// the whole tree (the host keeps blocks at the top level).
+// One flat entry list (headers + rows) for the single Reorderable, each
+// subtree contiguous after its header and deeper than it. Pinned top-level
+// groups and pinned ungrouped workspaces float to the top.
 const flatEntries = memoJSON(() => {
   const t = groupTree();
   claimPendingSubgroup();
   const editing = editingId();
-  const emit = (node, out, block) => {
+  const emit = (node, out) => {
     const hid = "h:" + node.key;
     const collapsed = nodeCollapsed(node);
     out.push({
@@ -623,7 +641,6 @@ const flatEntries = memoJSON(() => {
       editing: editing === hid,
       leaf: node.leaf,
       depth: node.depth,
-      block,
       collapsed,
       container: realContainer(node),
       outer: realContainer(node.parent),
@@ -634,14 +651,14 @@ const flatEntries = memoJSON(() => {
       // flattened under the header.
       for (const w of descendantsOf(node)) {
         if (isActiveId(w.id)) {
-          out.push(wsEntry(w.id, editing, node.depth + 1, w.group, block, breadcrumb(w, node), node.key));
+          out.push(wsEntry(w.id, editing, node.depth + 1, w.group, breadcrumb(w, node), node.key));
         }
       }
       return;
     }
     for (const item of node.items) {
-      if (item.ws) out.push(wsEntry(item.ws.id, editing, node.depth + 1, node.group.id, block, ""));
-      else emit(item.node, out, block);
+      if (item.ws) out.push(wsEntry(item.ws.id, editing, node.depth + 1, node.group.id, ""));
+      else emit(item.node, out);
     }
   };
 
@@ -649,9 +666,9 @@ const flatEntries = memoJSON(() => {
   const rest = [];
   for (const item of t.root.items) {
     if (item.ws) {
-      (item.ws.pinned ? pinned : rest).push(wsEntry(item.ws.id, editing, 0, null, null, ""));
+      (item.ws.pinned ? pinned : rest).push(wsEntry(item.ws.id, editing, 0, null, ""));
     } else {
-      emit(item.node, item.node.group && item.node.group.pinned ? pinned : rest, "h:" + item.node.key);
+      emit(item.node, item.node.group && item.node.group.pinned ? pinned : rest);
     }
   }
   return keyed([...pinned, ...rest]);
@@ -673,7 +690,7 @@ const filteredEntries = memoJSON(() => {
   const out = [];
   for (const w of structure()) {
     if ((filterActive() && isActiveId(w.id)) || (filterFavorites() && w.pinned)) {
-      out.push(wsEntry(w.id, editing, 0, w.group, null, breadcrumb(w, t.root)));
+      out.push(wsEntry(w.id, editing, 0, w.group, breadcrumb(w, t.root)));
     }
   }
   return keyed(out);
@@ -728,43 +745,12 @@ function filterBar() {
 // `extra.side` resolves the ambiguous boundary slots: "above" nests with the
 // row above (e.g. last item of a group), "below" with the row below (right
 // after the group, outside it) - chosen by the pointer's X position mid-drag.
-// Dragging a group HEADER moves its whole top-level tree (extra.block).
 function handleMove(id, index, extra) {
-  const ws = wsList();
-
-  if (extra && extra.block && id.startsWith("h:")) {
-    // Whole-tree move. workspace.group.move is NOT usable here: its
-    // to_index is a group-slot index (position among groups, clamped to the
-    // pin tier), so a tabs index overshoots to "last group" and a drop
-    // between ungrouped rows is unreachable. Instead send the full tabs
-    // order with the tree extracted and re-inserted contiguously (top anchor
-    // first, then display order) at the drop slot - the app's contiguity
-    // normalization keeps it.
-    const block = flatEntries().find((e) => e.id === id)?.block;
-    const top = block && nodeByKey(block.slice(2));
-    if (!top) return;
-    // One contiguous run per real group (anchor, members, then each subgroup):
-    // display order would interleave groups, and the host re-normalizes a
-    // split run, leaving the optimistic order unable to match its echo.
-    const run = (n) => [n.anchor, ...n.members, ...n.items.filter((i) => i.node).flatMap((i) => run(i.node))];
-    const blockIds = run(top).filter(Boolean).map((w) => w.id);
-    const moving = new Set(blockIds);
-    const entries = flatEntries().filter((e) => e.block !== block);
-    // `index` is the GRABBED header's slot; a subgroup header sits `offset`
-    // rows into its block. The next entry that stays put anchors the drop. A
-    // header counts too: dropping right above a (possibly collapsed) group
-    // means "before its first tab", not "after its hidden members".
-    const offset = flatEntries().filter((e) => e.block === block).findIndex((e) => e.id === id);
-    const nextEntry = entries[index - Math.max(offset, 0)];
-    const nextId = nextEntry ? (nextEntry.kind === "header" ? nextEntry.refId : nextEntry.wsId) : null;
-    const rest = ws.map((x) => x.id).filter((x) => !moving.has(x));
-    let insertAt = nextId ? rest.indexOf(nextId) : rest.length;
-    if (insertAt < 0) insertAt = rest.length;
-    const full = [...rest.slice(0, insertAt), ...blockIds, ...rest.slice(insertAt)];
-    setOrderOverride(full); // paint the new order now; reorder_many echoes behind it
-    cmux("workspace.reorder_many", { workspace_ids: JSON.stringify(full) });
+  if (id.startsWith("h:")) {
+    moveGroup(id, index, extra && extra.side);
     return;
   }
+  const ws = wsList();
 
   const dragged = ws.find((w) => w.id === id);
   if (!dragged) return;
@@ -866,6 +852,77 @@ function handleMove(id, index, extra) {
     cmux("workspace.reorder", { workspace_id: id, index: target });
   } else {
     cmux("workspace.reorder", { workspace_id: id, index: ws.length - 1 });
+  }
+}
+
+// A header drags as a single row; on drop its whole subtree follows. The slot
+// picks the new parent the way a row drop picks its group: right under an
+// expanded header nests into it, next to a row or a collapsed header lands at
+// that level, and at a group's end the boundary side decides (drag left to
+// move out). A slot inside the dragged subtree itself is no move.
+function moveGroup(id, index, side) {
+  const all = flatEntries();
+  const at = all.findIndex((e) => e.id === id);
+  const node = at >= 0 ? nodeByKey(all[at].nodeKey) : null;
+  if (!node) return;
+  let end = at + 1;
+  while (end < all.length && all[end].depth > node.depth) end += 1;
+  const own = new Set(all.slice(at, end).map((e) => e.id));
+  const entries = all.filter((e) => e.id !== id);
+  const { root, byGroupId } = groupTree();
+  // A row listed under a collapsed header stands beside that header; any
+  // other row is in its group.
+  const rowLevel = (e) =>
+    e.collapsedUnder ? nodeByKey(e.collapsedUnder).parent : byGroupId.get(e.container) ?? root;
+
+  let parent;
+  if (side === "below") {
+    const next = entries[index];
+    if (next && own.has(next.id)) return;
+    if (!next) parent = root;
+    else parent = next.kind === "header" ? nodeByKey(next.nodeKey).parent : rowLevel(next);
+  } else {
+    const prev = entries[index - 1];
+    if (prev && own.has(prev.id)) return;
+    if (!prev) parent = root;
+    else if (prev.kind === "header") parent = prev.collapsed ? nodeByKey(prev.nodeKey).parent : nodeByKey(prev.nodeKey);
+    else parent = rowLevel(prev);
+  }
+  // Released in its own slot under the same parent: nothing moved.
+  if (index === at && parent === node.parent) return;
+
+  // Tabs: the subtree is extracted and re-inserted as one contiguous run per
+  // real group (anchor, members, then each subgroup); the host re-normalizes
+  // a split run, leaving the optimistic order unable to match its echo.
+  // workspace.group.move is NOT usable: its to_index is a group-slot index
+  // (position among groups, clamped to the pin tier), so a drop between
+  // ungrouped rows is unreachable.
+  const run = (n) => [n.anchor, ...n.members, ...n.items.filter((i) => i.node).flatMap((i) => run(i.node))];
+  const ids = run(node).filter(Boolean).map((w) => w.id);
+  const moving = new Set(ids);
+  const ws = wsList();
+  const rest = ws.filter((w) => !moving.has(w.id));
+  // The next entry that stays put anchors the drop; a header stands for its
+  // first tab. Rows listed under a collapsed header map to no tab position.
+  // A header whose first tab is in the moving subtree (a virtual ancestor of
+  // the dragged group) can't anchor it.
+  const next = entries.slice(index).find((e) =>
+    !own.has(e.id) && !e.collapsedUnder && !(e.kind === "header" && moving.has(e.refId)));
+  const nextId = next ? (next.kind === "header" ? next.refId : next.wsId) : null;
+  let insertAt = nextId ? rest.findIndex((w) => w.id === nextId) : rest.length;
+  if (insertAt < 0) insertAt = rest.length;
+  // A slot among a group's own tabs moves past them: never split a run.
+  while (insertAt > 0 && insertAt < rest.length && rest[insertAt].group && rest[insertAt].group === rest[insertAt - 1].group) {
+    insertAt += 1;
+  }
+  const order = [...rest.slice(0, insertAt).map((w) => w.id), ...ids, ...rest.slice(insertAt).map((w) => w.id)];
+
+  if (parent !== node.parent) repath(node, [...parent.segs, ...leafSegs(node)]);
+  // An earlier drop still awaiting its echo means the host order is not the
+  // one on screen, so send even when this order matches the stale data.
+  if (orderOverride || order.join(",") !== ws.map((w) => w.id).join(",")) {
+    setOrderOverride(order); // paint the new order now; reorder_many echoes behind it
+    cmux("workspace.reorder_many", { workspace_ids: JSON.stringify(order) });
   }
 }
 
@@ -988,7 +1045,6 @@ function workspaceRow(w, e) {
     .background(memo(() => (multi() ? "#4C9EEB33" : (selected() ? "#7f7f7f3d" : null))))
     .hoverBackground(memo(() => (multi() ? "#4C9EEB33" : (selected() ? "#7f7f7f3d" : "#7f7f7f24"))))
     .frame({ maxWidth: "infinity" })
-    .block(memo(() => e().block))
     .dragSet(memo(() => (multi() ? "multi" : null)))
     .onTap((payload) => handleRowClick(w(), payload))
     .onDoubleTap(() => setEditingId(w().id))
@@ -1077,8 +1133,6 @@ function groupHeader(entry, e) {
     .background(memo(() => (selected() ? "#7f7f7f3d" : null)))
     .hoverBackground(memo(() => (selected() ? "#7f7f7f3d" : "#7f7f7f1c")))
     .frame({ maxWidth: "infinity" })
-    .fixed()
-    .block(memo(() => e().block))
     .onTap(() => selectWorkspace(anchor()?.id))
     .onDoubleTap(() => setEditingId(hid))
     .contextMenu(groupMenu(entry, e, g, withNode, toggle));

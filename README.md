@@ -117,8 +117,9 @@ the separator:
   - **Move Group Into ›** and **Move to Top Level** move a group together with its subtree.
   - **Ungroup** and **Delete Group** dissolve the group the cmux way: member workspaces are
     kept. Its direct subgroups move up one level.
-- Dragging any header moves its whole top-level tree. The cmux reorder surface only drags
-  blocks at the top level. To re-parent a group, use **Move Group Into**.
+- Drag a header to move a group with its whole subtree. Drop it right under another group's
+  header (or among its rows) to nest it there; at the end of a group, the pointer's X position
+  picks between staying inside and moving out a level. Dropping at the top level un-nests it.
 - Tradeoff: the built-in cmux sidebar shows the full names (`Work/Backend`).
 
 ## Development
