@@ -1,11 +1,15 @@
 # cmux-sidebar
 
-Custom left sidebar for [cmux](https://cmux.com), built on the cmux JS custom-sidebar runtime
-(`~/.config/cmux/sidebars/<name>.js`, see the [authoring guide](https://cmux.com/docs/custom-sidebars)).
-It is a fork of the upstream
-[`Examples/CustomSidebars/workspaces.js`](https://github.com/manaflow-ai/cmux/blob/main/Examples/CustomSidebars/workspaces.js)
-and keeps its behavior: select on click, inline rename (double-click), close, unread badge,
-multi-select (⌘-click / ⇧-click), Close Others, and drag-and-drop.
+> **Beta.** Used daily, but expect rough edges. Please
+> [open an issue](https://github.com/s4ff0x/cmux-sidebar/issues) with your cmux version
+> (`cmux --version`) when something looks wrong.
+
+A custom left sidebar for [cmux](https://cmux.com): nested workspace groups, live agent activity
+dots, and Active / Favorites filters. It runs on the cmux JS custom-sidebar runtime (one file in
+`~/.config/cmux/sidebars/`) and is a fork of the upstream
+[`Examples/CustomSidebars/workspaces.js`](https://github.com/manaflow-ai/cmux/blob/main/Examples/CustomSidebars/workspaces.js).
+It keeps that example's behavior: select on click, inline rename (double-click), close, unread
+badge, multi-select (⌘-click / ⇧-click), Close Others, and drag-and-drop.
 
 ## Features
 
@@ -37,30 +41,52 @@ multi-select (⌘-click / ⇧-click), Close Others, and drag-and-drop.
 
 ## Install
 
-Requires cmux (tested on 0.64.25) with Custom Sidebars enabled (on by default).
+Paste this into a **cmux terminal**:
 
 ```sh
-git clone https://github.com/s4ff0x/cmux-sidebar.git
-cd cmux-sidebar
-./install.sh
+curl -fsSL https://github.com/s4ff0x/cmux-sidebar/releases/latest/download/install.sh | sh
 ```
 
-`install.sh` symlinks `src/cmux-sidebar.js` into `~/.config/cmux/sidebars/`, so edits to the
-source hot-reload. It then runs `cmux sidebar validate cmux-sidebar` and
-`cmux sidebar select cmux-sidebar`. An existing non-symlink file with the same name is moved
-aside to a timestamped `.bak` first.
+This downloads the latest release into `~/.config/cmux/sidebars/cmux-sidebar.js`, validates it,
+and switches the left sidebar to it. Run it from a cmux terminal: by default cmux accepts CLI
+commands only from processes it started. From any other terminal the file is still installed;
+then right-click the sidebar button in cmux and pick **cmux-sidebar**.
 
-To switch back, right-click the sidebar toggle button and pick another sidebar.
+Requirements: cmux 0.64.25 or newer (the version it is tested on), with Custom Sidebars enabled
+(the default; **Settings → Custom Sidebars**).
 
-### Prerequisite: agent hooks
+- **Update:** run the same command again.
+- **Pin a version:** `curl -fsSL https://github.com/s4ff0x/cmux-sidebar/releases/latest/download/install.sh | sh -s -- --version v0.1.0-beta`
+  ([releases](https://github.com/s4ff0x/cmux-sidebar/releases)).
+- **Uninstall:** `curl -fsSL https://github.com/s4ff0x/cmux-sidebar/releases/latest/download/install.sh | sh -s -- --uninstall`,
+  then pick another sidebar from the sidebar button's right-click menu.
+- **Without the script:** download `cmux-sidebar.js` from a
+  [release](https://github.com/s4ff0x/cmux-sidebar/releases), put it in
+  `~/.config/cmux/sidebars/`, and pick it from the sidebar button's right-click menu.
 
-The activity dots read the agent sessions cmux tracks through hooks. cmux exposes no process
-information to sidebars, so an agent without hooks never shows as working.
+If a file named `cmux-sidebar.js` that this installer did not write is already there, it is moved
+to a timestamped `.bak` first. If the new file fails `cmux sidebar validate`, the previous one is
+put back.
 
-- **Claude Code:** the cmux Claude wrapper injects its hooks automatically.
-- **omp:** install the hooks once with `cmux hooks omp install`. This creates
-  `~/.omp/agent/extensions/cmux-omp-session.ts`. omp loads it when a session starts, so restart
-  sessions that were already running.
+## Supported agents
+
+The activity dots read the coding-agent sessions that cmux tracks through its agent hooks. cmux
+exposes no process information to sidebars, so an agent without hooks never shows as working.
+
+**Tested:**
+
+- **Claude Code:** works out of the box; the cmux Claude wrapper injects its hooks.
+- **omp:** install the hooks once with `cmux hooks omp install`, then restart running omp
+  sessions (omp loads the hook extension when a session starts).
+
+**Untested, expected to work:** the sidebar reads cmux's generic session status (working, needs
+input, idle, ended) and never checks which agent it is. So any agent that cmux hooks into should
+show the same dots once its hooks are installed with `cmux hooks setup` (or
+`cmux hooks setup <agent>`). As of cmux 0.64.25 that list is Codex, OpenCode, Pi, Gemini, Cursor
+CLI, Copilot, Amp, Grok, Kimi Code, Kiro CLI, Rovo Dev, CodeBuddy, Factory, Qoder, Campfire,
+and Antigravity; see cmux's
+[agent hook docs](https://github.com/manaflow-ai/cmux/blob/main/docs/agent-hooks.md). Reports
+for other agents are welcome.
 
 ### Limits of the green dot
 
@@ -98,14 +124,26 @@ the separator:
 ## Development
 
 ```sh
-npm test        # node:test suite, run against cmux's real SidebarRuntime.js
-npm run check   # syntax check
+git clone https://github.com/s4ff0x/cmux-sidebar.git
+cd cmux-sidebar
+./install.sh --dev   # symlinks src/cmux-sidebar.js into cmux, so saves hot-reload
+npm test            # node:test suite, run against cmux's real SidebarRuntime.js
+npm run check       # syntax check
 cmux sidebar validate cmux-sidebar
 ```
 
 The tests load the runtime from the installed app
 (`/Applications/cmux.app/.../SidebarRuntime.js`). Override the path with
 `CMUX_SIDEBAR_RUNTIME=/path/to/SidebarRuntime.js`.
+
+### Releasing
+
+1. On a Mac with cmux installed, run `npm test` on the commit you want to release (CI cannot:
+   the tests need the app's runtime).
+2. Tag it and push the tag: `git tag v0.2.0 && git push origin v0.2.0`.
+3. `.github/workflows/release.yml` publishes a GitHub Release with `cmux-sidebar.js` and
+   `install.sh` attached. The install command always fetches the newest release, so do not
+   mark a release as a pre-release unless users should skip it.
 
 ### Performance
 
@@ -115,3 +153,8 @@ reads data only through change-only memos (`memo`, `memoJSON`) and gives each wo
 signal, so a tick costs ops only for what actually changed. `test/perf.test.js` holds this
 budget on a 60-workspace, 3-level fixture: an identical tick sends 0 scene ops (it used to send
 about 1144), and one agent starting work touches only its own row and the `Active` count.
+
+## License
+
+GPL-3.0-or-later, see [LICENSE](LICENSE). This sidebar is derived from cmux's
+`Examples/CustomSidebars/workspaces.js` (Copyright Manaflow, Inc., GPL-3.0-or-later).

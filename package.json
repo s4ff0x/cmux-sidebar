@@ -1,6 +1,7 @@
 {
   "name": "cmux-sidebar",
   "private": true,
+  "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "check": "node --check src/cmux-sidebar.js && node --check test/harness.js",
