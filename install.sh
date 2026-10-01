@@ -82,6 +82,7 @@ else
   if [ -f "$dest" ] && [ ! -L "$dest" ]; then cp "$dest" "$prev"; fi
   set_aside_foreign
   cp "$tmp" "$dest"
+  chmod 644 "$dest" # mktemp creates 0600
   echo "Installed $dest ($version)"
 fi
 
