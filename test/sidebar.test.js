@@ -204,6 +204,31 @@ describe("collapse keeps active work visible", () => {
     sb.row("c-one").tap();
     assert.deepEqual(sb.outline(), ["A", "loose"]);
   });
+
+  test("opening a row listed under a collapsed group keeps the group collapsed", () => {
+    const state = (gA = {}, a1 = {}) =>
+      tree3({ gA: { collapsed: true, ...gA }, a1: { agents: [agent("working")], ...a1 } });
+    const sb = mountSidebar(state());
+    sb.row("a-one").tap();
+    // cmux expands the selected workspace's group on select; re-collapse it.
+    assert.deepEqual(sb.take(), [
+      { method: "workspace.select", params: { workspace_id: "a1" } },
+      { method: "workspace.group.collapse", params: { group_id: "gA" } },
+    ]);
+    const collapsedView = ["A ● 1", "  a-one", "loose"];
+    sb.setData(state()); // a tick from before the select landed
+    assert.deepEqual(sb.outline(), collapsedView);
+    sb.setData(state({ collapsed: false }, { selected: true })); // the select echo with cmux's auto-expand
+    assert.deepEqual(sb.outline(), collapsedView);
+    sb.setData(state({}, { selected: true })); // our collapse lands
+    assert.deepEqual(sb.outline(), collapsedView);
+  });
+
+  test("opening a row in an expanded group sends only the select", () => {
+    const sb = mountSidebar(tree3());
+    sb.row("a-one").tap();
+    assert.deepEqual(sb.take(), [{ method: "workspace.select", params: { workspace_id: "a1" } }]);
+  });
 });
 
 describe("group menu", () => {

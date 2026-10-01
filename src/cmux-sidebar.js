@@ -57,6 +57,17 @@ function selectWorkspace(id) {
   selectOverride = id;
   setSelectTick(selectTick() + 1);
   cmux("workspace.select", { workspace_id: id });
+  // cmux expands the selected workspace's collapsed group (anchors excepted).
+  // A row listed under a collapsed header is opened in place, so collapse the
+  // group straight back; the override keeps the expand echo from flashing.
+  const w = (data.workspaces() ?? []).find((x) => x.id === id);
+  const g = w && groupById(w.group);
+  if (g && g.anchorId !== id && isCollapsed(g)) {
+    collapseOverride.set(g.id, true);
+    collapseHold.set(g.id, id);
+    setCollapseTick(collapseTick() + 1);
+    cmux("workspace.group.collapse", { group_id: g.id });
+  }
 }
 
 // Finished-and-unseen tracking. cmux exposes no "last opened" time, so the
@@ -238,12 +249,19 @@ const [editingId, setEditingId] = signal(null);
 
 // --- optimistic collapse -----------------------------------------------------
 const collapseOverride = new Map();
+// group id -> workspace id: an override set while selecting into a collapsed
+// group must outlive data that predates the select (it still says
+// "collapsed", so it would look caught up) until cmux echoes the selection,
+// the point where its auto-expand has happened.
+const collapseHold = new Map();
 const [collapseTick, setCollapseTick] = signal(0);
 
 function isCollapsed(g) {
   collapseTick();
   if (collapseOverride.has(g.id)) {
     const v = collapseOverride.get(g.id);
+    if (collapseHold.has(g.id) && data.selectedId() !== collapseHold.get(g.id)) return v;
+    collapseHold.delete(g.id);
     if (v === g.collapsed) collapseOverride.delete(g.id); // host caught up
     else return v;
   }
