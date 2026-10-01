@@ -1,0 +1,9 @@
+{
+  "name": "cmux-sidebar",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check src/cmux-sidebar.js && node --check test/harness.js",
+    "test": "node --test test/*.test.js"
+  }
+}
