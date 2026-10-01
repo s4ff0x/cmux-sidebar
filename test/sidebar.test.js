@@ -144,35 +144,33 @@ describe("nested groups", () => {
 });
 
 describe("group header activity", () => {
-  test("a header shows its anchor's dot and counts working descendants", () => {
-    const sb = mountSidebar(tree3({
-      a: { agents: [agent("working")] },
-      b: { agents: [agent("needs_input")] },
-      b1: { agents: [agent("working")] },
-      c1: { agents: [agent("working")] },
-    }));
-    assert.deepEqual(
-      ["A", "B", "C"].map((h) => [sb.row(h).indicator(), sb.row(h).counts().working]),
-      [["working", 2], [null, 2], [null, 1]],
-    );
+  const busy = () => tree3({
+    a: { agents: [agent("working")] },
+    b: { agents: [agent("needs_input")] },
+    b1: { agents: [agent("working")] },
+    c1: { agents: [agent("working")] },
   });
 
-  test("a header counts finished descendants separately, until they are opened", () => {
-    const sb = mountSidebar(tree3({ c1: { agents: [agent("working")] } }));
-    sb.setData(tree3({ c1: { agents: [agent("idle")] } }));
-    assert.deepEqual(sb.row("A").counts(), { working: 0, finished: 1 });
-    sb.row("c-one").tap();
-    assert.deepEqual(sb.row("A").counts(), { working: 0, finished: 0 });
+  test("a header shows its own anchor's dot", () => {
+    const sb = mountSidebar(busy());
+    assert.deepEqual(["A", "B", "C"].map((h) => sb.row(h).indicator()), ["working", null, null]);
   });
 
-  test("the count stays on a collapsed header", () => {
-    const sb = mountSidebar(tree3({ c1: { agents: [agent("working")] }, gA: { collapsed: true } }));
-    assert.deepEqual(sb.row("A").counts(), { working: 1, finished: 0 });
+  test("headers show no activity counts, expanded or collapsed", () => {
+    const sb = mountSidebar(busy());
+    const before = sb.row("A").text;
+    sb.row("A").tapImage("chevron.right");
+    assert.deepEqual([before, sb.row("A").text], ["A", "A"]);
   });
 
-  test("headers with no activity below show no count", () => {
-    const sb = mountSidebar(tree3());
-    assert.deepEqual(sb.outline().slice(0, 1), ["A"]);
+  test("tapping a header whose anchor workspace is gone selects nothing and keeps the highlight", () => {
+    const sb = mountSidebar({
+      workspaces: workspaces({ id: "m1", title: "member", group: "g", selected: true }),
+      groups: [group("g", "G", "gone")],
+    });
+    sb.row("G").tap();
+    assert.deepEqual(sb.take(), []);
+    assert.equal(sb.row("member").highlighted, true);
   });
 });
 
@@ -181,24 +179,24 @@ describe("collapse keeps active work visible", () => {
 
   test("a collapsed group shows only working descendants, with a breadcrumb from subgroups", () => {
     const sb = sim({ gA: { collapsed: true }, c1: { agents: [agent("working")] }, a1: { agents: [agent("working")] }, b1: { agents: [agent("needs_input")] } });
-    assert.deepEqual(sb.outline(), ["A ● 2", "  a-one", "  B › C › c-one", "loose"]);
+    assert.deepEqual(sb.outline(), ["A", "  a-one", "  B › C › c-one", "loose"]);
   });
 
   test("a working subgroup anchor surfaces as a row when its header is hidden", () => {
     const sb = sim({ gA: { collapsed: true }, b: { agents: [agent("working")] } });
-    assert.deepEqual(sb.outline(), ["A ● 1", "  B › A/B", "loose"]);
+    assert.deepEqual(sb.outline(), ["A", "  B › A/B", "loose"]);
   });
 
   test("a collapsed subgroup inside an expanded group flattens only its own subtree", () => {
     const sb = sim({ gB: { collapsed: true }, c1: { agents: [agent("working")] } });
-    assert.deepEqual(sb.outline(), ["A ● 1", "  a-one", "  B ● 1", "    C › c-one", "loose"]);
+    assert.deepEqual(sb.outline(), ["A", "  a-one", "  B", "    C › c-one", "loose"]);
   });
 
   test("a finished row stays under its collapsed header until it is opened", () => {
     const sb = sim({ gA: { collapsed: true } });
     assert.deepEqual(sb.outline(), ["A", "loose"]);
     sb.setData(tree3({ gA: { collapsed: true }, c1: { agents: [agent("working")] } }));
-    assert.deepEqual(sb.outline(), ["A ● 1", "  B › C › c-one", "loose"]);
+    assert.deepEqual(sb.outline(), ["A", "  B › C › c-one", "loose"]);
     sb.setData(tree3({ gA: { collapsed: true }, c1: { agents: [agent("ended")] } }));
     assert.equal(sb.row("c-one").indicator(), "finished");
     sb.row("c-one").tap();
@@ -215,7 +213,7 @@ describe("collapse keeps active work visible", () => {
       { method: "workspace.select", params: { workspace_id: "a1" } },
       { method: "workspace.group.collapse", params: { group_id: "gA" } },
     ]);
-    const collapsedView = ["A ● 1", "  a-one", "loose"];
+    const collapsedView = ["A", "  a-one", "loose"];
     sb.setData(state()); // a tick from before the select landed
     assert.deepEqual(sb.outline(), collapsedView);
     sb.setData(state({ collapsed: false }, { selected: true })); // the select echo with cmux's auto-expand
@@ -364,31 +362,14 @@ describe("border color", () => {
   const two = () =>
     workspaces({ id: "w1", title: "red", color: "#FF453A" }, { id: "w2", title: "plain" });
 
-  test("a workspace color draws the leading bar; no color, no bar", () => {
-    const sb = mountSidebar({ workspaces: two() });
-    assert.deepEqual([sb.row("red").barColor(), sb.row("plain").barColor()], ["#FF453A", null]);
-  });
-
-  test("choosing a swatch sets the native color and shows the bar before the data echoes", () => {
+  test("Border Color still sets and clears the native color", () => {
     const sb = mountSidebar({ workspaces: two() });
     sb.row("plain").menu("Border Color", "Blue");
+    sb.row("red").menu("Border Color", "None");
     assert.deepEqual(sb.take(), [
       { method: "workspace.action", params: { action: "set_color", workspace_id: "w2", color: "#0A84FF" } },
+      { method: "workspace.action", params: { action: "clear_color", workspace_id: "w1" } },
     ]);
-    assert.equal(sb.row("plain").barColor(), "#0A84FF");
-  });
-
-  test("None clears the native color and removes the bar", () => {
-    const sb = mountSidebar({ workspaces: two() });
-    sb.row("red").menu("Border Color", "None");
-    assert.deepEqual(sb.take(), [{ method: "workspace.action", params: { action: "clear_color", workspace_id: "w1" } }]);
-    assert.equal(sb.row("red").barColor(), null);
-  });
-
-  test("the bar follows a color changed elsewhere (e.g. the built-in sidebar)", () => {
-    const sb = mountSidebar({ workspaces: two() });
-    sb.setData({ workspaces: workspaces({ id: "w1", title: "red" }, { id: "w2", title: "plain", color: "#30D158" }) });
-    assert.deepEqual([sb.row("red").barColor(), sb.row("plain").barColor()], [null, "#30D158"]);
   });
 });
 
@@ -470,7 +451,7 @@ describe("drag and drop", () => {
   test("rows listed under a collapsed group keep their group and tab position when reordered", () => {
     const state = tree3({ gA: { collapsed: true }, a1: { agents: [agent("working")] }, c1: { agents: [agent("working")] } });
     const sb = mountSidebar(state);
-    assert.deepEqual(sb.outline(), ["A ● 2", "  a-one", "  B › C › c-one", "loose"]);
+    assert.deepEqual(sb.outline(), ["A", "  a-one", "  B › C › c-one", "loose"]);
     sb.drop("c1", 1); // c-one above a-one
     sb.drop("a1", 2); // a-one below c-one
     sb.row("a-one").tap({ cmd: true });
@@ -544,5 +525,100 @@ describe("group edits stay scoped", () => {
     });
     sb.row("B").menu("Ungroup");
     assert.deepEqual(renames(sb.take()), [["gC", "A/C 2"], ["gD", "A/C 2/D"]]);
+  });
+});
+
+describe("favorites", () => {
+  test("Favorite pins the workspace through cmux; a pinned row shows the red bookmark", () => {
+    const sb = mountSidebar({
+      workspaces: workspaces({ id: "w1", title: "fav", pinned: true }, { id: "w2", title: "plain" }),
+    });
+    assert.deepEqual([sb.row("fav").favorite(), sb.row("plain").favorite()], [true, false]);
+    sb.row("plain").menu("Favorite");
+    sb.row("fav").menu("Unfavorite");
+    assert.deepEqual(sb.take(), [
+      { method: "workspace.action", params: { action: "pin", workspace_id: "w2" } },
+      { method: "workspace.action", params: { action: "unpin", workspace_id: "w1" } },
+    ]);
+  });
+
+  test("the bookmark follows a pin changed elsewhere", () => {
+    const sb = mountSidebar({ workspaces: workspaces({ id: "w1", title: "job" }) });
+    sb.setData({ workspaces: workspaces({ id: "w1", title: "job", pinned: true }) });
+    assert.equal(sb.row("job").favorite(), true);
+  });
+});
+
+describe("filters", () => {
+  // tree3 with B collapsed, c1 working, b1 finished (working -> idle), and
+  // a1 a favorite.
+  const mixed = () => {
+    const over = (b1) => tree3({ gB: { collapsed: true }, c1: { agents: [agent("working")] }, b1: { agents: [agent(b1)] }, a1: { pinned: true } });
+    const sb = mountSidebar(over("working"));
+    sb.setData(over("idle"));
+    return sb;
+  };
+
+  test("Active shows only working and finished workspaces, flat, in tab order, with their group path", () => {
+    const sb = mixed();
+    sb.chip("Active").tap();
+    assert.deepEqual(sb.outline(), ["A › B › b-one", "A › B › C › c-one"]);
+    assert.deepEqual([sb.row("b-one").indicator(), sb.row("c-one").indicator()], ["finished", "working"]);
+    assert.deepEqual([sb.chip("Active").text, sb.chip("Active").on], ["Active · 2", true]);
+  });
+
+  test("Favorites shows only pinned workspaces", () => {
+    const sb = mixed();
+    sb.chip("Favorites").tap();
+    assert.deepEqual(sb.outline(), ["A › a-one"]);
+    assert.equal(sb.row("a-one").favorite(), true);
+  });
+
+  test("with both on, a workspace shows if it matches either", () => {
+    const sb = mixed();
+    sb.chip("Active").tap();
+    sb.chip("Favorites").tap();
+    assert.deepEqual(sb.outline(), ["A › a-one", "A › B › b-one", "A › B › C › c-one"]);
+  });
+
+  test("turning the filter off restores the tree with collapse state untouched", () => {
+    const sb = mixed();
+    const tree = sb.outline();
+    sb.chip("Active").tap();
+    sb.chip("Active").tap();
+    assert.deepEqual(sb.outline(), tree);
+    assert.equal(sb.chip("Active").on, false);
+    assert.deepEqual(sb.take(), []);
+  });
+
+  test("an empty filtered list says so", () => {
+    const sb = mountSidebar(tree3());
+    sb.chip("Active").tap();
+    assert.deepEqual(sb.outline(), ["No active workspaces"]);
+    sb.chip("Favorites").tap();
+    assert.deepEqual(sb.outline(), ["No active or favorite workspaces"]);
+    sb.chip("Active").tap();
+    assert.deepEqual(sb.outline(), ["No favorite workspaces"]);
+  });
+
+  test("a workspace joins the Active list when work starts and leaves once its finished turn is opened", () => {
+    const state = (x) => tree3({ x });
+    const sb = mountSidebar(state({}));
+    sb.chip("Active").tap();
+    sb.setData(state({ agents: [agent("working")] }));
+    assert.deepEqual(sb.outline(), ["loose"]);
+    sb.setData(state({ agents: [agent("idle")] }));
+    assert.equal(sb.row("loose").indicator(), "finished");
+    sb.row("loose").tap();
+    assert.deepEqual(sb.take(), [{ method: "workspace.select", params: { workspace_id: "x" } }]);
+    assert.deepEqual(sb.outline(), ["No active workspaces"]);
+  });
+
+  test("green dots survive toggling the filter", () => {
+    const sb = mixed();
+    sb.chip("Active").tap();
+    sb.chip("Active").tap();
+    sb.chip("Active").tap();
+    assert.equal(sb.row("b-one").indicator(), "finished");
   });
 });

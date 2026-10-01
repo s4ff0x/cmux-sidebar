@@ -51,6 +51,8 @@ export function mountSidebar(state) {
   const nodes = new Map();
   const actions = [];
   let rootId = null;
+  // Every scene op the sidebar sent, in order: the work the host pays for.
+  const opLog = [];
 
   const apply = (op) => {
     switch (op.op) {
@@ -78,7 +80,10 @@ export function mountSidebar(state) {
   };
 
   const ctx = vm.createContext({
-    __host_applyOps: (json) => JSON.parse(json).forEach(apply),
+    __host_applyOps: (json) => JSON.parse(json).forEach((op) => {
+      opLog.push(op);
+      apply(op);
+    }),
     __host_action: (json) => {
       const a = JSON.parse(json);
       if (a.kind === "cmux") actions.push({ method: a.method, params: a.params });
@@ -143,7 +148,16 @@ export function mountSidebar(state) {
     const field = findDeep(n.id, (x) => x.type === "textfield")[0];
     return {
       key,
+      nodeId: n.id,
+      // The red bookmark that marks a favorite: shown (and given width) on
+      // the row's leading edge.
+      favorite() {
+        return findDeep(n.id, (x) => x.type === "image" && x.props.systemName === "bookmark.fill", { skipHidden: true })
+          .some((x) => x.props.width !== 0 && x.props.color === "#FF453A");
+      },
       header: n.props.fixed === true,
+      // The selected (or multi-selected) row paints a resting background.
+      highlighted: !!n.props.background,
       texts: visibleTexts,
       text: visibleTexts.join(" "),
       indent: n.props.marginLeading ?? 0,
@@ -155,21 +169,6 @@ export function mountSidebar(state) {
         if (shown.some((x) => x.props.fill === ORANGE)) return "working";
         if (shown.some((x) => x.props.fill === GREEN)) return "finished";
         return null;
-      },
-      // Header "● N" counts by color: { working, finished }.
-      counts() {
-        const out = { working: 0, finished: 0 };
-        for (const t of findDeep(n.id, (x) => x.type === "text" && x.props.text, { skipHidden: true })) {
-          const num = Number(String(t.props.text).replace(/\D/g, ""));
-          if (t.props.color === ORANGE) out.working = num;
-          if (t.props.color === GREEN) out.finished = num;
-        }
-        return out;
-      },
-      // The leading border bar: a visible rectangle with a fill.
-      barColor() {
-        const bar = findDeep(n.id, (x) => x.type === "rectangle" && x.props.fill, { skipHidden: true })[0];
-        return bar ? bar.props.fill : null;
       },
       tap(payload = {}) {
         dispatch(n.id, "tap", payload);
@@ -198,10 +197,51 @@ export function mountSidebar(state) {
     };
   };
 
+  // The full tree (the Reorderable, with drag keys) followed by the filtered
+  // flat list and its empty state (ForEach groups outside any context menu).
   const rows = () => {
     const l = list();
     const keys = JSON.parse(l.props.itemKeys ?? "[]");
-    return l.children.map((id, i) => makeRow(node(id), keys[i]));
+    const tree = l.children.map((id, i) => makeRow(node(id), keys[i]));
+    const flat = findDeep(rootId, (n) => n.type === "group")
+      .flatMap((g) => g.children.map((id) => makeRow(node(id), null)));
+    return [...tree, ...flat];
+  };
+
+  const textsOf = (n) =>
+    findDeep(n.id, (x) => x.type === "text" && x.props.text, { skipHidden: true }).map((x) => x.props.text);
+
+  // The filter chips at the top: tappable nodes outside both lists.
+  const chipNodes = () => {
+    const inLists = new Set(findDeep(rootId, (n) => n.type === "reorderable" || n.type === "group")
+      .flatMap((n) => findDeep(n.id, () => true).map((x) => x.id)));
+    return findDeep(rootId, (n) => n.props.tappable === true && !inLists.has(n.id));
+  };
+
+  // A filter chip by the start of its label ("Active", "Favorites").
+  const chip = (label) => {
+    const found = chipNodes().find((n) => textsOf(n).join(" ").startsWith(label));
+    if (!found) throw new Error(`no chip "${label}"`);
+    return {
+      text: textsOf(found).join(" "),
+      on: !!found.props.background,
+      tap() {
+        dispatch(found.id, "tap", {});
+      },
+    };
+  };
+
+  // Which visible rows and chips own the nodes a batch of ops touched (menus
+  // included), by label; "list" for anything else (the lists themselves).
+  const touchedBy = (ops) => {
+    const owner = new Map();
+    for (const r of rows()) {
+      for (const n of findDeep(r.nodeId, () => true, { skipMenus: false })) owner.set(n.id, r.text);
+    }
+    for (const c of chipNodes()) {
+      for (const n of findDeep(c.id, () => true)) owner.set(n.id, textsOf(c).join(" "));
+    }
+    return [...new Set(ops.map((op) => owner.get(op.id) ?? "list"))].sort();
   };
 
   const row = (text) => {
@@ -215,12 +255,20 @@ export function mountSidebar(state) {
     setData,
     rows,
     row,
+    chip,
     // Visible rows as "label" strings, indented two spaces per 14pt level.
     outline: () => rows().map((r) => " ".repeat((r.indent / 14) * 2) + (r.editing !== null ? `[${r.editing}]` : r.text)),
     actions,
     take() {
       return actions.splice(0, actions.length);
     },
+    // The scene ops sent to the host while `fn` runs.
+    opsDuring(fn) {
+      const start = opLog.length;
+      fn();
+      return opLog.slice(start);
+    },
+    touchedBy,
     // A Reorderable drop exactly as the host reports it.
     drop(key, index, extra = {}) {
       dispatch(list().id, "move", { id: key, index, side: "above", block: false, ...extra });

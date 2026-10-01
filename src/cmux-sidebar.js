@@ -14,6 +14,79 @@
 //
 // Install: ./install.sh (symlinks into ~/.config/cmux/sidebars/).
 
+// --- change-only data ------------------------------------------------------------
+// The runtime never dedupes: a binding re-runs and re-sends its prop whenever
+// anything it read notifies, and every data key arrives as a freshly parsed
+// object, so a naive sidebar re-sends the whole tree each tick. Everything
+// below reads host data through these memos, which notify only on a real
+// change, and every reactive prop goes through memo() so it emits an op only
+// when its value differs.
+
+// A signal fed by `fn` that notifies only when the value changes (`Object.is`).
+function memo(fn) {
+  const [read, write] = signal(undefined);
+  computed(() => {
+    write(fn());
+  });
+  return read;
+}
+
+// Same, compared by JSON content: for arrays and objects rebuilt per run.
+function memoJSON(fn) {
+  const [read, write] = signal(undefined);
+  let last = null;
+  computed(() => {
+    const value = fn();
+    const json = JSON.stringify(value) ?? "";
+    if (json === last) return;
+    last = json;
+    write(value);
+  });
+  return read;
+}
+
+const wsList = memoJSON(() => data.workspaces() ?? []);
+const groupsList = memoJSON(() => data.groups() ?? []);
+const selectedId = memo(() => data.selectedId() ?? "");
+const groupsById = computed(() => new Map(groupsList().map((g) => [g.id, g])));
+const groupById = (id) => groupsById().get(id);
+
+// One signal per workspace, written only when THAT workspace's data changes,
+// so a row re-runs for its own changes and never scans the list. Entries are
+// kept for ids that went away (reading undefined), so a reader captured
+// before a workspace appears or after it closes never goes stale.
+const wsSignals = new Map(); // id -> { read, write, json }
+
+function wsEntryFor(id) {
+  let s = wsSignals.get(id);
+  if (!s) {
+    const [read, write] = signal(undefined);
+    s = { read, write, json: undefined };
+    wsSignals.set(id, s);
+  }
+  return s;
+}
+
+const wsSig = (id) => wsEntryFor(id).read;
+
+computed(() => {
+  const seen = new Set();
+  for (const w of wsList()) {
+    seen.add(w.id);
+    const s = wsEntryFor(w.id);
+    const json = JSON.stringify(w);
+    if (s.json !== json) {
+      s.json = json;
+      s.write(w);
+    }
+  }
+  for (const [id, s] of wsSignals) {
+    if (seen.has(id) || s.json === undefined) continue;
+    s.json = undefined;
+    s.write(undefined);
+  }
+});
+
 // --- agent activity ------------------------------------------------------------
 // Orange = an agent is really working: a coding agent mid-turn, or one of its
 // subagents still running. Waiting on the user (needs_input), idle, and ended
@@ -22,16 +95,18 @@ const WORKING_ORANGE = "#FF8A00";
 // Green = finished and not yet looked at: the workspace was working, its turn
 // ended while another workspace was open, and it has not been opened since.
 const FINISHED_GREEN = "#30D158";
+// Favorites are cmux's native pin, marked with a red bookmark.
+const FAVORITE_RED = "#FF453A";
 
 const isWorking = (w) =>
   !!w && (w.agents || []).some((a) => a.status === "working" || (a.children || []).some((c) => c.running));
 
 // Fixed-width leading dot slot; rows without activity keep the empty slot so
-// titles stay aligned.
+// titles stay aligned. `state` is a change-only signal.
 function activityDot(state) {
   return ZStack({}, [
-    Circle({ size: 8 }).fill(WORKING_ORANGE).opacity(() => (state() === "working" ? 1 : 0)),
-    Circle({ size: 8 }).fill(FINISHED_GREEN).opacity(() => (state() === "finished" ? 1 : 0)),
+    Circle({ size: 8 }).fill(WORKING_ORANGE).opacity(memo(() => (state() === "working" ? 1 : 0))),
+    Circle({ size: 8 }).fill(FINISHED_GREEN).opacity(memo(() => (state() === "finished" ? 1 : 0))),
   ]).frame({ width: 14, height: 14 });
 }
 
@@ -46,7 +121,7 @@ function isSelected(w) {
   selectTick();
   if (!w) return false;
   if (selectOverride) {
-    if (data.selectedId() === selectOverride) selectOverride = null; // caught up
+    if (selectedId() === selectOverride) selectOverride = null; // caught up
     else return w.id === selectOverride;
   }
   return !!w.selected;
@@ -60,7 +135,7 @@ function selectWorkspace(id) {
   // cmux expands the selected workspace's collapsed group (anchors excepted).
   // A row listed under a collapsed header is opened in place, so collapse the
   // group straight back; the override keeps the expand echo from flashing.
-  const w = (data.workspaces() ?? []).find((x) => x.id === id);
+  const w = wsSig(id)();
   const g = w && groupById(w.group);
   if (g && g.anchorId !== id && isCollapsed(g)) {
     collapseOverride.set(g.id, true);
@@ -77,9 +152,11 @@ function selectWorkspace(id) {
 const finished = new Set();
 let wasWorking = new Set();
 const finishedVersion = computed(() => {
-  const ws = data.workspaces() ?? [];
+  const ws = wsList();
   const working = new Set();
+  const present = new Set();
   for (const w of ws) {
+    present.add(w.id);
     if (isWorking(w)) {
       working.add(w.id);
       finished.delete(w.id);
@@ -88,7 +165,7 @@ const finishedVersion = computed(() => {
     }
     if (isSelected(w)) finished.delete(w.id); // opened: seen
   }
-  for (const id of Array.from(finished)) if (!ws.some((w) => w.id === id)) finished.delete(id);
+  for (const id of finished) if (!present.has(id)) finished.delete(id);
   wasWorking = working;
   return Array.from(finished).sort().join(",");
 });
@@ -117,14 +194,13 @@ function setOrderOverride(ids) {
 function visibleWorkspaces() {
   closeTick();
   orderTick();
-  let ws = data.workspaces() ?? [];
-  for (const id of Array.from(closedOverride)) {
-    if (!ws.some((w) => w.id === id)) closedOverride.delete(id); // caught up
-  }
-  ws = ws.filter((w) => !closedOverride.has(w.id));
+  let ws = wsList();
+  const present = new Set(ws.map((w) => w.id));
+  for (const id of closedOverride) if (!present.has(id)) closedOverride.delete(id); // caught up
+  if (closedOverride.size) ws = ws.filter((w) => !closedOverride.has(w.id));
   if (orderOverride) {
     const actual = ws.map((w) => w.id).join(",");
-    const wanted = orderOverride.filter((id) => ws.some((w) => w.id === id)).join(",");
+    const wanted = orderOverride.filter((id) => present.has(id) && !closedOverride.has(id)).join(",");
     if (actual === wanted) {
       orderOverride = null; // caught up
     } else {
@@ -159,8 +235,10 @@ function clearMultiSelect() {
   setMultiTick(multiTick() + 1);
 }
 
+// The rows currently on screen, in order: the filtered list or the tree.
 function visibleRowIds() {
-  return flatEntries().filter((e) => e.kind === "ws").map((e) => e.wsId);
+  const entries = filtering() ? filteredEntries() : flatEntries();
+  return entries.filter((e) => e.kind === "ws").map((e) => e.wsId);
 }
 
 function handleRowClick(w, payload) {
@@ -192,26 +270,9 @@ function bulkIds(w) {
   return w ? [w.id] : [];
 }
 
-// Optimistic border color: the bar paints the chosen color (or none) at
-// once; the native workspace color echoes back on the next tick.
-const colorOverride = new Map();
-const [colorTick, setColorTick] = signal(0);
-
-function displayColor(w) {
-  colorTick();
-  if (!w) return null;
-  const actual = w.color ?? null;
-  if (colorOverride.has(w.id)) {
-    const v = colorOverride.get(w.id);
-    if ((v ?? "").toLowerCase() === (actual ?? "").toLowerCase()) colorOverride.delete(w.id); // caught up
-    else return v;
-  }
-  return actual;
-}
-
+// Border Color sets the native cmux workspace color (shown by the built-in
+// sidebar); this sidebar does not draw it.
 function setBorderColor(id, color) {
-  colorOverride.set(id, color);
-  setColorTick(colorTick() + 1);
   if (color) cmux("workspace.action", { action: "set_color", workspace_id: id, color });
   else cmux("workspace.action", { action: "clear_color", workspace_id: id });
 }
@@ -260,7 +321,7 @@ function isCollapsed(g) {
   collapseTick();
   if (collapseOverride.has(g.id)) {
     const v = collapseOverride.get(g.id);
-    if (collapseHold.has(g.id) && data.selectedId() !== collapseHold.get(g.id)) return v;
+    if (collapseHold.has(g.id) && selectedId() !== collapseHold.get(g.id)) return v;
     collapseHold.delete(g.id);
     if (v === g.collapsed) collapseOverride.delete(g.id); // host caught up
     else return v;
@@ -296,7 +357,13 @@ const SEP = "/";
 const INDENT = 14;
 const splitPath = (name) => String(name ?? "").split(SEP).map((s) => s.trim()).filter(Boolean);
 const joinPath = (segs) => segs.join(SEP);
-const groupById = (id) => (data.groups() ?? []).find((g) => g.id === id);
+
+// The part of the workspace list the tree's shape depends on, in visible tab
+// order. An agent heartbeat or a title edit leaves it unchanged, so the tree
+// is not rebuilt for them.
+const structure = memoJSON(() =>
+  visibleWorkspaces().map((w) => ({ id: w.id, group: w.group ?? null, pinned: !!w.pinned })),
+);
 
 // Tree node: { key, group (null = virtual), segs, path, leaf, parent, depth,
 // anchor, members (non-anchor rows), children (subgroup nodes), items
@@ -304,16 +371,22 @@ const groupById = (id) => (data.groups() ?? []).find((g) => g.id === id);
 // A real group sits at its ANCHOR's tabs position (the app's canonical block
 // position); a virtual one at its earliest descendant's. Siblings sort by it.
 const groupTree = computed(() => {
-  const ws = visibleWorkspaces();
+  const ws = structure();
   const pos = new Map(ws.map((w, i) => [w.id, i]));
   const byKey = new Map();
   const byGroupId = new Map();
   const byPath = new Map();
   const root = { key: "", group: null, segs: [], path: "", children: [], members: [], depth: -1 };
 
+  const byGroup = new Map();
+  for (const w of ws) {
+    if (!w.group) continue;
+    if (!byGroup.has(w.group)) byGroup.set(w.group, []);
+    byGroup.get(w.group).push(w);
+  }
   const real = [];
-  for (const g of data.groups() ?? []) {
-    const members = ws.filter((w) => w.group === g.id);
+  for (const g of groupsList()) {
+    const members = byGroup.get(g.id) ?? [];
     if (members.length === 0) continue;
     const anchor = members.find((w) => w.id === g.anchorId) ?? null;
     const segs = splitPath(g.name);
@@ -481,8 +554,8 @@ const choice = (n) => ({ key: n.key, label: pathLabel(n), groupId: n.group ? n.g
 // subtree (a group can't move inside itself).
 const moveTargets = (node) => treeNodes().filter((n) => !isWithin(n, node)).map(choice);
 // "Move to Group" targets: real groups only (a virtual header has no cmux
-// group to join).
-const groupChoices = () => treeNodes().filter((n) => n.group).map(choice);
+// group to join). One shared list for every row's submenu.
+const groupChoices = memoJSON(() => treeNodes().filter((n) => n.group).map(choice));
 
 // New Subgroup: the group (and its generated anchor workspace) arrives with
 // a later data tick; flatEntries opens it for rename once it shows up. The
@@ -492,42 +565,56 @@ let pendingSubgroup = null;
 function newSubgroup(node) {
   for (let n = node; n && n.depth >= 0; n = n.parent) if (nodeCollapsed(n)) toggleNode(n);
   const name = joinPath(freePath([...node.segs, "New Group"], null));
-  pendingSubgroup = { name, known: new Set((data.groups() ?? []).map((g) => g.id)) };
+  pendingSubgroup = { name, known: new Set(groupsList().map((g) => g.id)) };
   cmux("workspace.group.create", { name });
 }
 
 function claimPendingSubgroup() {
   if (!pendingSubgroup) return;
   const { name, known } = pendingSubgroup;
-  const g = (data.groups() ?? []).find((x) => x.name === name && !known.has(x.id));
+  const g = groupsList().find((x) => x.name === name && !known.has(x.id));
   if (!g) return;
   pendingSubgroup = null;
   setEditingId("h:g:" + g.id);
+}
+
+const isActiveId = (id) => isActive(wsSig(id)());
+
+// List entries by key. A row template reads its entry here instead of from
+// its item signal: reading the signal while the list mounts the row would
+// subscribe the whole list to that row's changes.
+const entryByKey = new Map();
+
+function keyed(entries) {
+  for (const e of entries) entryByKey.set(e.id, e);
+  return entries;
+}
+
+function wsEntry(id, editing, depth, container, block, crumb, collapsedUnder = null) {
+  return {
+    kind: "ws",
+    id: id + (editing === id ? ":edit" : ""),
+    wsId: id,
+    editing: editing === id,
+    container,
+    depth,
+    block,
+    crumb,
+    collapsedUnder,
+  };
 }
 
 // One flat entry list (headers + rows) for the single Reorderable. Pinned
 // top-level groups and pinned ungrouped workspaces float to the top. Every
 // entry of a top-level tree shares one drag `block`, so a header drag moves
 // the whole tree (the host keeps blocks at the top level).
-const flatEntries = computed(() => {
+const flatEntries = memoJSON(() => {
   const t = groupTree();
   claimPendingSubgroup();
   const editing = editingId();
-  const wsEntry = (w, depth, container, block, crumb, collapsedUnder = null) => ({
-    kind: "ws",
-    id: w.id + (editing === w.id ? ":edit" : ""),
-    wsId: w.id,
-    editing: editing === w.id,
-    container,
-    depth,
-    block,
-    crumb,
-    collapsedUnder,
-  });
   const emit = (node, out, block) => {
     const hid = "h:" + node.key;
     const collapsed = nodeCollapsed(node);
-    const below = descendantsOf(node);
     out.push({
       kind: "header",
       id: hid + (editing === hid ? ":edit" : ""),
@@ -541,19 +628,19 @@ const flatEntries = computed(() => {
       container: realContainer(node),
       outer: realContainer(node.parent),
       refId: node.refId,
-      working: below.filter(isWorking).length,
-      finished: below.filter((w) => activity(w) === "finished").length,
     });
     if (collapsed) {
       // Collapsed: only working and finished-unseen descendants stay,
       // flattened under the header.
-      for (const w of below) {
-        if (isActive(w)) out.push(wsEntry(w, node.depth + 1, w.group, block, breadcrumb(w, node), node.key));
+      for (const w of descendantsOf(node)) {
+        if (isActiveId(w.id)) {
+          out.push(wsEntry(w.id, editing, node.depth + 1, w.group, block, breadcrumb(w, node), node.key));
+        }
       }
       return;
     }
     for (const item of node.items) {
-      if (item.ws) out.push(wsEntry(item.ws, node.depth + 1, node.group.id, block, ""));
+      if (item.ws) out.push(wsEntry(item.ws.id, editing, node.depth + 1, node.group.id, block, ""));
       else emit(item.node, out, block);
     }
   };
@@ -562,13 +649,79 @@ const flatEntries = computed(() => {
   const rest = [];
   for (const item of t.root.items) {
     if (item.ws) {
-      (item.ws.pinned ? pinned : rest).push(wsEntry(item.ws, 0, null, null, ""));
+      (item.ws.pinned ? pinned : rest).push(wsEntry(item.ws.id, editing, 0, null, null, ""));
     } else {
       emit(item.node, item.node.group && item.node.group.pinned ? pinned : rest, "h:" + item.node.key);
     }
   }
-  return [...pinned, ...rest];
+  return keyed([...pinned, ...rest]);
 });
+
+// --- filters -------------------------------------------------------------------
+// Two toggles at the top: Active (orange or green dot) and Favorites (pinned).
+// While either is on, the tree gives way to one flat list, in tab order, of
+// the workspaces matching ANY enabled filter, each with its group path as a
+// dim breadcrumb. Filter state is local and resets when the sidebar mounts.
+const [filterActive, setFilterActive] = signal(false);
+const [filterFavorites, setFilterFavorites] = signal(false);
+const filtering = () => filterActive() || filterFavorites();
+
+const filteredEntries = memoJSON(() => {
+  if (!filtering()) return [];
+  const t = groupTree();
+  const editing = editingId();
+  const out = [];
+  for (const w of structure()) {
+    if ((filterActive() && isActiveId(w.id)) || (filterFavorites() && w.pinned)) {
+      out.push(wsEntry(w.id, editing, 0, w.group, null, breadcrumb(w, t.root)));
+    }
+  }
+  return keyed(out);
+});
+
+const activeCount = memo(() => structure().filter((w) => isActiveId(w.id)).length);
+const favoriteCount = memo(() => structure().filter((w) => w.pinned).length);
+
+// The empty filtered list says which filters came up empty.
+const emptyMessage = memo(() => {
+  if (!filtering() || filteredEntries().length > 0) return null;
+  if (filterActive() && filterFavorites()) return "No active or favorite workspaces";
+  return filterActive() ? "No active workspaces" : "No favorite workspaces";
+});
+
+function filterChip(label, isOn, toggle, icon) {
+  return HStack({ spacing: 4 }, [
+    icon,
+    Text(label).font(11).weight("medium").lineLimit(1)
+      .color(memo(() => (isOn() ? "primary" : "secondary"))),
+  ])
+    .paddingHorizontal(8)
+    .paddingVertical(3)
+    .cornerRadius(9)
+    .background(memo(() => (isOn() ? "#7f7f7f3d" : null)))
+    .hoverBackground(memo(() => (isOn() ? "#7f7f7f3d" : "#7f7f7f24")))
+    .onTap(toggle);
+}
+
+function filterBar() {
+  return HStack({ spacing: 6 }, [
+    filterChip(
+      memo(() => "Active · " + activeCount()),
+      filterActive,
+      () => setFilterActive(!filterActive()),
+      Circle({ size: 7 }).fill(WORKING_ORANGE),
+    ),
+    filterChip(
+      memo(() => "Favorites · " + favoriteCount()),
+      filterFavorites,
+      () => setFilterFavorites(!filterFavorites()),
+      Image("bookmark.fill").font(9).color(FAVORITE_RED),
+    ),
+    Spacer(),
+  ])
+    .paddingLeading(4)
+    .paddingBottom(2);
+}
 
 // --- drop resolution ---------------------------------------------------------
 // `index` is the dragged row's slot in the flat list (headers included).
@@ -577,7 +730,7 @@ const flatEntries = computed(() => {
 // after the group, outside it) - chosen by the pointer's X position mid-drag.
 // Dragging a group HEADER moves its whole top-level tree (extra.block).
 function handleMove(id, index, extra) {
-  const ws = data.workspaces() ?? [];
+  const ws = wsList();
 
   if (extra && extra.block && id.startsWith("h:")) {
     // Whole-tree move. workspace.group.move is NOT usable here: its
@@ -717,20 +870,24 @@ function handleMove(id, index, extra) {
 }
 
 // --- rows ----------------------------------------------------------------------
+// Every reactive prop below goes through memo(), so a row re-sends a prop only
+// when its value changes. `w` is the row's own workspace signal; `e` its entry.
 function workspaceMenu(w) {
   const act = (action) => () =>
     cmux("workspace.action", { action, workspace_id: w().id });
   // ForEach keeps the submenu current as groups come and go.
   const groupItems = ForEach(
     { items: groupChoices, key: (c) => c.key },
-    (c) => Button(() => c().label, () => {
+    (c) => Button(memo(() => c().label), () => {
       for (const id of bulkIds(w())) cmux("workspace.group.add", { group_id: c().groupId, workspace_id: id });
       clearMultiSelect();
     }),
   );
-  const count = () => bulkIds(w()).length;
+  const count = memo(() => bulkIds(w()).length);
+  const pinned = memo(() => !!w()?.pinned);
+  const unread = memo(() => w()?.unread > 0);
   return [
-    Button(() => (count() > 1 ? "New Group from " + count() + " Workspaces" : "New Group with This"), () => {
+    Button(memo(() => (count() > 1 ? "New Group from " + count() + " Workspaces" : "New Group with This")), () => {
       cmux("workspace.group.create", {
         name: "New Group",
         child_workspace_ids: JSON.stringify(bulkIds(w())),
@@ -739,9 +896,11 @@ function workspaceMenu(w) {
     }),
     Divider(),
     Button("Rename", () => setEditingId(w().id)),
-    Button(() => (w()?.pinned ? "Unpin" : "Pin"), () =>
+    // Favorite is cmux's native pin, so it persists and the built-in
+    // sidebar agrees.
+    Button(memo(() => (pinned() ? "Unfavorite" : "Favorite")), () =>
       cmux("workspace.action", { action: w()?.pinned ? "unpin" : "pin", workspace_id: w().id })),
-    Button(() => (w()?.unread > 0 ? "Mark as Read" : "Mark as Unread"), () =>
+    Button(memo(() => (unread() ? "Mark as Read" : "Mark as Unread")), () =>
       cmux("workspace.action", { action: w()?.unread > 0 ? "mark_read" : "mark_unread", workspace_id: w().id })),
     Divider(),
     Menu("Move", [
@@ -758,57 +917,55 @@ function workspaceMenu(w) {
     ]),
     Divider(),
     Button("Close Others", act("close_others")).destructive(),
-    Button(() => (count() > 1 ? "Close " + count() + " Workspaces" : "Close"), () => {
+    Button(memo(() => (count() > 1 ? "Close " + count() + " Workspaces" : "Close")), () => {
       for (const id of bulkIds(w())) closeWorkspace(id);
       clearMultiSelect();
     }).destructive(),
   ];
 }
 
-function workspaceRow(w, entry) {
-  // The title owns the FULL row width; badge, pin, and close button FLOAT
-  // over its trailing edge (ZStack trailing) instead of reserving layout.
-  // No fades anywhere (they read as glitches when they appear); overflow
-  // truncates with a plain ellipsis.
+function workspaceRow(w, e) {
+  const selected = memo(() => isSelected(w()));
+  const multi = memo(() => isMultiSelected(w()));
+  const unread = memo(() => w()?.unread ?? 0);
+  const pinned = memo(() => !!w()?.pinned);
+  const crumb = memo(() => e().crumb);
+  // The title owns the FULL row width; badge and close button FLOAT over its
+  // trailing edge (ZStack trailing) instead of reserving layout. No fades
+  // anywhere (they read as glitches when they appear); overflow truncates
+  // with a plain ellipsis.
   return ZStack({ alignment: "trailing" }, [
     HStack({ spacing: 0 }, [
-      // Gaps live on this unframed wrapper: the host applies padding INSIDE a
-      // node's own frame, so padding a framed node would squeeze its content.
-      HStack({ spacing: 5 }, [
-        // 3pt leading bar in the workspace color. The slot is always reserved
-        // (just transparent without a color) so titles never shift.
-        Rectangle()
-          .fill(() => displayColor(w()) ?? "clear")
-          .opacity(() => (displayColor(w()) ? 1 : 0))
-          .frame({ width: 3, height: 18 })
-          .cornerRadius(1.5),
-        activityDot(() => activity(w())),
-      ]).paddingTrailing(4),
-      // Dim "B › C ›" path for a row shown under a collapsed ancestor.
-      Text(() => entry().crumb)
+      // The gap lives on this unframed wrapper: the host applies padding
+      // INSIDE a node's own frame, so padding the framed dot would squeeze it.
+      HStack({ spacing: 0 }, [activityDot(memo(() => activity(w())))]).paddingTrailing(4),
+      // Red bookmark on favorites. It takes width only when shown, inside
+      // this zero-spacing stack, so other rows' titles stay aligned.
+      Image("bookmark.fill")
+        .font(10).color(FAVORITE_RED)
+        .opacity(memo(() => (pinned() ? 1 : 0)))
+        .frame({ width: memo(() => (pinned() ? 9 : 0)) })
+        .paddingTrailing(memo(() => (pinned() ? 5 : 0))),
+      // Dim "B › C ›" path for a row shown away from its group.
+      Text(crumb)
         .font(13).color("tertiary").lineLimit(1)
-        .paddingTrailing(() => (entry().crumb ? 4 : 0)),
-      Text(() => displayTitle(w()))
+        .paddingTrailing(memo(() => (crumb() ? 4 : 0))),
+      Text(memo(() => displayTitle(w())))
         .font(13)
         .lineLimit(1)
         .truncation("tail")
-        .color(() => (isSelected(w()) ? "primary" : "secondary")),
+        .color(memo(() => (selected() ? "primary" : "secondary"))),
       Spacer({ minLength: 0 }),
     ])
       .frame({ maxWidth: "infinity" }),
     ZStack({}, [
       // Unread badge at rest; on hover it yields to the close button.
-      Text(() => (w()?.unread > 0 ? String(w().unread) : ""))
+      Text(memo(() => (unread() > 0 ? String(unread()) : "")))
         .font("caption2").bold().color("white")
-        .paddingHorizontal(() => (w()?.unread > 0 ? 5 : 0))
-        .paddingVertical(() => (w()?.unread > 0 ? 1 : 0))
-        .background(() => (w()?.unread > 0 ? "#E4573D" : null))
+        .paddingHorizontal(memo(() => (unread() > 0 ? 5 : 0)))
+        .paddingVertical(memo(() => (unread() > 0 ? 1 : 0)))
+        .background(memo(() => (unread() > 0 ? "#E4573D" : null)))
         .cornerRadius(7)
-        .hideOnHover(),
-      // Pin marker shows when pinned and no unread badge claims the slot.
-      Image("pin.fill")
-        .font(8).color("tertiary")
-        .opacity(() => (w()?.pinned && !(w()?.unread > 0) ? 1 : 0))
         .hideOnHover(),
       // Circular close: uniform padding around the glyph + full-round corner
       // (the background hugs content+padding, so padding IS the circle size).
@@ -826,22 +983,22 @@ function workspaceRow(w, entry) {
     .paddingLeading(2)
     .paddingTrailing(10)
     .paddingVertical(6)
-    .marginLeading(() => entry().depth * INDENT)
+    .marginLeading(memo(() => e().depth * INDENT))
     .cornerRadius(8)
-    .background(() => (isMultiSelected(w()) ? "#4C9EEB33" : (isSelected(w()) ? "#7f7f7f3d" : null)))
-    .hoverBackground(() => (isMultiSelected(w()) ? "#4C9EEB33" : (isSelected(w()) ? "#7f7f7f3d" : "#7f7f7f24")))
+    .background(memo(() => (multi() ? "#4C9EEB33" : (selected() ? "#7f7f7f3d" : null))))
+    .hoverBackground(memo(() => (multi() ? "#4C9EEB33" : (selected() ? "#7f7f7f3d" : "#7f7f7f24"))))
     .frame({ maxWidth: "infinity" })
-    .block(() => entry().block)
-    .dragSet(() => (isMultiSelected(w()) ? "multi" : null))
+    .block(memo(() => e().block))
+    .dragSet(memo(() => (multi() ? "multi" : null)))
     .onTap((payload) => handleRowClick(w(), payload))
     .onDoubleTap(() => setEditingId(w().id))
     .contextMenu(workspaceMenu(w));
 }
 
 // In-place editor row (same box as a workspace row).
-function workspaceEditRow(w, entry) {
+function workspaceEditRow(w, e) {
   return HStack({ spacing: 8 }, [
-    TextField(() => w()?.title ?? "", {
+    TextField(memo(() => w()?.title ?? ""), {
       placeholder: "Workspace name",
       onSubmit: (t) => {
         const title = (t ?? "").trim();
@@ -861,15 +1018,18 @@ function workspaceEditRow(w, entry) {
     .paddingVertical(6)
     .cornerRadius(8)
     .background("#7f7f7f3d")
-    .marginLeading(() => entry().depth * INDENT)
+    .marginLeading(memo(() => e().depth * INDENT))
     .frame({ maxWidth: "infinity" });
 }
 
-function groupHeader(e) {
-  const { nodeKey, groupId } = e(); // stable per key
+function groupHeader(entry, e) {
+  const { nodeKey, groupId } = entry; // stable per key
   const hid = "h:" + nodeKey;
   const g = () => (groupId && groupById(groupId)) || { id: groupId, name: "", collapsed: false, pinned: false };
-  const anchor = () => (groupId ? (data.workspaces() ?? []).find((w) => w.id === g().anchorId) : null);
+  const anchorId = memo(() => (groupId ? g().anchorId : null));
+  const anchor = () => (anchorId() ? wsSig(anchorId())() : undefined);
+  const selected = memo(() => isSelected(anchor()));
+  const state = memo(() => activity(anchor()));
   // Menu actions resolve the node at click time (the tree rebuilds per tick).
   const withNode = (fn) => () => {
     const node = nodeByKey(nodeKey);
@@ -884,24 +1044,19 @@ function groupHeader(e) {
     // keeps the header height constant.
     Image("chevron.right")
       .font(10).weight("semibold").color("tertiary")
-      .rotation(() => (e().collapsed ? 0 : 90))
+      .rotation(memo(() => (e().collapsed ? 0 : 90)))
       .frame({ width: 14, height: 16 })
       .onTap(toggle),
     // The anchor's own glyph overlays a leading inset that only opens while
     // it runs. The host auto-boosts only a bare truncating Text over sibling
     // Spacers, so the wrapper needs the boost explicitly.
     ZStack({ alignment: "leading" }, [
-      Text(() => e().leaf).font(12).weight("semibold").lineLimit(1).truncation("tail")
-        .color(() => (isSelected(anchor()) ? "primary" : "secondary"))
-        .paddingLeading(() => (activity(anchor()) ? 18 : 0)),
-      activityDot(() => activity(anchor())),
+      Text(memo(() => e().leaf)).font(12).weight("semibold").lineLimit(1).truncation("tail")
+        .color(memo(() => (selected() ? "primary" : "secondary")))
+        .paddingLeading(memo(() => (state() ? 18 : 0))),
+      activityDot(state),
     ]).layoutPriority(1),
     Spacer(),
-    // Working / finished descendants, shown expanded or collapsed.
-    Text(() => (e().working > 0 ? "● " + e().working : ""))
-      .font(11).monospaced().color(WORKING_ORANGE),
-    Text(() => (e().finished > 0 ? "● " + e().finished : ""))
-      .font(11).monospaced().color(FINISHED_GREEN),
     // Hover-revealed `+`, styled like the row close button. Virtual headers
     // have no group to create into, so theirs stays hidden and inert.
     Image("plus")
@@ -917,31 +1072,32 @@ function groupHeader(e) {
     .paddingLeading(8)
     .paddingTrailing(10)
     .paddingVertical(5)
-    .marginLeading(() => e().depth * INDENT)
+    .marginLeading(memo(() => e().depth * INDENT))
     .cornerRadius(8)
-    .background(() => (isSelected(anchor()) ? "#7f7f7f3d" : null))
-    .hoverBackground(() => (isSelected(anchor()) ? "#7f7f7f3d" : "#7f7f7f1c"))
+    .background(memo(() => (selected() ? "#7f7f7f3d" : null)))
+    .hoverBackground(memo(() => (selected() ? "#7f7f7f3d" : "#7f7f7f1c")))
     .frame({ maxWidth: "infinity" })
     .fixed()
-    .block(() => e().block)
+    .block(memo(() => e().block))
     .onTap(() => selectWorkspace(anchor()?.id))
     .onDoubleTap(() => setEditingId(hid))
-    .contextMenu(groupMenu(e, g, withNode, toggle));
+    .contextMenu(groupMenu(entry, e, g, withNode, toggle));
 }
 
-function groupMenu(e, g, withNode, toggle) {
-  const { groupId, nodeKey } = e();
+function groupMenu(entry, e, g, withNode, toggle) {
+  const { groupId, nodeKey } = entry;
   const hid = "h:" + nodeKey;
-  const structure = [
+  const targets = memoJSON(() => moveTargets(nodeByKey(nodeKey) ?? {}));
+  const items = [
     Button("New Subgroup", withNode(newSubgroup)),
     Divider(),
     Button("Rename Group", () => setEditingId(hid)),
-    Button(() => (e().collapsed ? "Expand" : "Collapse"), toggle),
+    Button(memo(() => (e().collapsed ? "Expand" : "Collapse")), toggle),
     Divider(),
     Menu("Move Group Into", [
       ForEach(
-        { items: () => moveTargets(nodeByKey(nodeKey) ?? {}), key: (t) => t.key },
-        (t) => Button(() => t().label, withNode((node) => {
+        { items: targets, key: (t) => t.key },
+        (t) => Button(memo(() => t().label), withNode((node) => {
           const target = nodeByKey(t().key);
           if (target) repath(node, [...target.segs, ...leafSegs(node)]);
         })),
@@ -950,12 +1106,12 @@ function groupMenu(e, g, withNode, toggle) {
     Button("Move to Top Level", withNode((node) => repath(node, leafSegs(node)))),
   ];
   // A virtual header has no cmux group to pin, ungroup, or delete.
-  if (!groupId) return structure;
+  if (!groupId) return items;
   return [
     Button("New Workspace in Group", () => newWorkspaceIn(groupId)),
-    ...structure,
+    ...items,
     Divider(),
-    Button(() => (g().pinned ? "Unpin Group" : "Pin Group"), () =>
+    Button(memo(() => (g().pinned ? "Unpin Group" : "Pin Group")), () =>
       cmux(g().pinned ? "workspace.group.unpin" : "workspace.group.pin", { group_id: groupId })),
     Button("Ungroup", withNode((node) => dissolve(node, "workspace.group.ungroup"))),
     Button("Delete Group", withNode((node) => dissolve(node, "workspace.group.delete"))).destructive(),
@@ -970,14 +1126,14 @@ function newWorkspaceIn(groupId) {
 
 // Identical geometry to groupHeader (chevron box, paddings, semibold 12)
 // so entering/leaving rename changes nothing but the text becoming editable.
-function groupEditRow(e) {
-  const { nodeKey } = e();
+function groupEditRow(entry, e) {
+  const { nodeKey } = entry;
   return HStack({ spacing: 6 }, [
     Image("chevron.right")
       .font(10).weight("semibold").color("tertiary")
-      .rotation(() => (e().collapsed ? 0 : 90))
+      .rotation(memo(() => (e().collapsed ? 0 : 90)))
       .frame({ width: 14, height: 16 }),
-    TextField(() => e().leaf, {
+    TextField(memo(() => e().leaf), {
       placeholder: "Group name",
       onSubmit: (t) => {
         // The field edits the leaf; "/" in it nests further.
@@ -992,32 +1148,45 @@ function groupEditRow(e) {
     .paddingLeading(8)
     .paddingTrailing(10)
     .paddingVertical(5)
-    .marginLeading(() => e().depth * INDENT)
+    .marginLeading(memo(() => e().depth * INDENT))
     .cornerRadius(8)
     .background("#7f7f7f3d")
     .frame({ maxWidth: "infinity" })
     .fixed();
 }
 
+// One template for both lists. The entry comes from entryByKey: kind, ids,
+// and editing are stable per key, and reading `e()` here would subscribe the
+// whole list to this row.
+function entryRow(e, key) {
+  const entry = entryByKey.get(key);
+  if (entry.kind === "header") return entry.editing ? groupEditRow(entry, e) : groupHeader(entry, e);
+  const w = wsSig(entry.wsId);
+  return entry.editing ? workspaceEditRow(w, e) : workspaceRow(w, e);
+}
+
 // --- root ------------------------------------------------------------------------
 sidebar(() =>
   VStack({ spacing: 4 }, [
-  Reorderable(
-    {
-      items: flatEntries,
-      key: (e) => e.id,
-      spacing: 2,
-      onMove: handleMove,
-    },
-    (e, key) => {
-      const entry = e(); // kind, ids, and editing are stable per key
-      if (entry.kind === "header") {
-        return entry.editing ? groupEditRow(e) : groupHeader(e);
-      }
-      const w = () => (data.workspaces() ?? []).find((x) => x.id === entry.wsId);
-      return entry.editing ? workspaceEditRow(w, e) : workspaceRow(w, e);
-    }
-  ),
+    filterBar(),
+    // The full tree; empty (no rows mounted) while a filter is on.
+    Reorderable(
+      {
+        items: () => (filtering() ? [] : flatEntries()),
+        key: (e) => e.id,
+        spacing: 2,
+        onMove: handleMove,
+      },
+      entryRow,
+    ),
+    // The filtered flat list; mounts rows only while a filter is on.
+    VStack({ spacing: 2 }, [
+      ForEach({ items: filteredEntries, key: (e) => e.id }, entryRow),
+      ForEach(
+        { items: memo(() => (emptyMessage() ? [emptyMessage()] : [])), key: (m) => m },
+        (m) => Text(memo(() => m())).font(12).color("tertiary").paddingHorizontal(10).paddingVertical(6),
+      ),
+    ]),
   ]),
-  { surface: "glass" }
-)
+  { surface: "glass" },
+);
