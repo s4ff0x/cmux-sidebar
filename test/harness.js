@@ -197,13 +197,27 @@ export function mountSidebar(state) {
   };
 
   // The full tree (the Reorderable, with drag keys) followed by the filtered
-  // flat list and its empty state (ForEach groups outside any context menu).
+  // flat list and its empty state: the top-level ForEach groups outside the
+  // Reorderable (rows have ForEach groups of their own inside).
+  const listGroups = () => {
+    const out = [];
+    const walk = (nid) => {
+      const n = node(nid);
+      if (!n || n.type === "contextMenu" || n.type === "reorderable") return;
+      if (n.type === "group") {
+        out.push(n);
+        return;
+      }
+      for (const c of n.children) walk(c);
+    };
+    walk(rootId);
+    return out;
+  };
   const rows = () => {
     const l = list();
     const keys = JSON.parse(l.props.itemKeys ?? "[]");
     const tree = l.children.map((id, i) => makeRow(node(id), keys[i]));
-    const flat = findDeep(rootId, (n) => n.type === "group")
-      .flatMap((g) => g.children.map((id) => makeRow(node(id), null)));
+    const flat = listGroups().flatMap((g) => g.children.map((id) => makeRow(node(id), null)));
     return [...tree, ...flat];
   };
 
@@ -268,6 +282,9 @@ export function mountSidebar(state) {
       return opLog.slice(start);
     },
     touchedBy,
+    // Scene nodes the host renders for a row (context menus excluded): the
+    // host pays for each of them on every scroll frame.
+    renderedNodes: (r) => findDeep(r.nodeId, () => true).length,
     // A Reorderable drop exactly as the host reports it.
     drop(key, index, extra = {}) {
       dispatch(list().id, "move", { id: key, index, side: "above", block: false, ...extra });

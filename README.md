@@ -155,6 +155,15 @@ signal, so a tick costs ops only for what actually changed. `test/perf.test.js` 
 budget on a 60-workspace, 3-level fixture: an identical tick sends 0 scene ops (it used to send
 about 1144), and one agent starting work touches only its own row and the `Active` count.
 
+Scrolling has a different cost. The host renders the list in a non-lazy SwiftUI `ScrollView`,
+and every scroll frame re-processes each rendered scene node (every node carries its own hover
+tracking), so scroll cost grows with nodes per row, not with data. Rows therefore mount only what
+they show: the activity dot, favorite bookmark, breadcrumb, and unread badge mount on demand
+(a row without a dot keeps the slot as padding), and the dot is one circle. A plain row is 7 nodes
+(it was 13), a header 7 (was 9), with the same pixels. On a 102-workspace sidebar this cut the
+cmux main thread from about 85% to about 52% busy while scrolling, and SwiftUI's render share
+from about 55% to about 29%. The same `test/perf.test.js` holds the per-row node budget.
+
 ## License
 
 GPL-3.0-or-later, see [LICENSE](LICENSE). This sidebar is derived from cmux's

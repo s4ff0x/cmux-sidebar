@@ -118,13 +118,17 @@ const FAVORITE_RED = "#FF453A";
 const isWorking = (w) =>
   !!w && (w.agents || []).some((a) => a.status === "working" || (a.children || []).some((c) => c.running));
 
-// Fixed-width leading dot slot; rows without activity keep the empty slot so
-// titles stay aligned. `state` is a change-only signal.
-function activityDot(state) {
-  return ZStack({}, [
-    Circle({ size: 8 }).fill(WORKING_ORANGE).opacity(memo(() => (state() === "working" ? 1 : 0))),
-    Circle({ size: 8 }).fill(FINISHED_GREEN).opacity(memo(() => (state() === "finished" ? 1 : 0))),
-  ]).frame({ width: 14, height: 14 });
+// A 14pt dot slot. `state` is a change-only signal; the dot hides while it
+// is null. One node: every rendered node costs the host work on every scroll
+// frame (see README, Performance), so the color is a prop rather than a
+// second circle. `gap` adds trailing space inside the frame (padding sits
+// inside a node's frame), leaving the circle where it was.
+function activityDot(state, gap = 0) {
+  const dot = Circle({ size: 8 })
+    .fill(memo(() => (state() === "finished" ? FINISHED_GREEN : WORKING_ORANGE)))
+    .opacity(memo(() => (state() ? 1 : 0)));
+  if (gap) dot.paddingTrailing(gap);
+  return dot.frame({ width: 14 + gap, height: 14 });
 }
 
 // --- optimistic UI -------------------------------------------------------------
@@ -981,49 +985,59 @@ function workspaceMenu(w) {
   ];
 }
 
+// The dot leads the row with a 4pt gap after its 14pt slot. Padding sits
+// inside a node's frame, so the gap is trailing padding in an 18pt frame:
+// the circle lands where it does in a header's 14pt slot.
+const ROW_DOT_SLOT = 18;
+
 function workspaceRow(w, e) {
   const selected = memo(() => isSelected(w()));
   const multi = memo(() => isMultiSelected(w()));
   const unread = memo(() => w()?.unread ?? 0);
   const pinned = memo(() => !!w()?.pinned);
   const crumb = memo(() => e().crumb);
+  const state = memo(() => activity(w()));
+  // Dot, favorite bookmark, and breadcrumb mount only while shown: every
+  // mounted node costs the host work on each scroll frame, and most rows
+  // show none of them. A row without a dot keeps its slot as leading
+  // padding, so titles stay aligned.
+  const leading = memoJSON(() =>
+    [state() && "dot", pinned() && "pin", crumb() && "crumb"].filter(Boolean),
+  );
+  const badge = memoJSON(() => (unread() > 0 ? ["badge"] : []));
   // The title owns the FULL row width; badge and close button FLOAT over its
   // trailing edge (ZStack trailing) instead of reserving layout. No fades
   // anywhere (they read as glitches when they appear); overflow truncates
   // with a plain ellipsis.
   return ZStack({ alignment: "trailing" }, [
+    // Its frame leads, so no trailing Spacer is needed to left-align it.
     HStack({ spacing: 0 }, [
-      // The gap lives on this unframed wrapper: the host applies padding
-      // INSIDE a node's own frame, so padding the framed dot would squeeze it.
-      HStack({ spacing: 0 }, [activityDot(memo(() => activity(w())))]).paddingTrailing(4),
-      // Red bookmark on favorites. It takes width only when shown, inside
-      // this zero-spacing stack, so other rows' titles stay aligned.
-      Image("bookmark.fill")
-        .font(10).color(FAVORITE_RED)
-        .opacity(memo(() => (pinned() ? 1 : 0)))
-        .frame({ width: memo(() => (pinned() ? 9 : 0)) })
-        .paddingTrailing(memo(() => (pinned() ? 5 : 0))),
-      // Dim "B › C ›" path for a row shown away from its group.
-      Text(crumb)
-        .font(13).color("tertiary").lineLimit(1)
-        .paddingTrailing(memo(() => (crumb() ? 4 : 0))),
+      // Priority 1, like the title (the host's default for a lineLimit
+      // Text), so a long breadcrumb and title still share truncation.
+      ForEach({ items: leading, key: (k) => k, layoutPriority: 1 }, (_, k) => {
+        if (k === "dot") return activityDot(state, ROW_DOT_SLOT - 14);
+        // Red bookmark on favorites.
+        if (k === "pin") return Image("bookmark.fill").font(10).color(FAVORITE_RED).frame({ width: 9 }).paddingTrailing(5);
+        // Dim "B › C ›" path for a row shown away from its group.
+        return Text(crumb).font(13).color("tertiary").lineLimit(1).paddingTrailing(4);
+      }),
       Text(memo(() => displayTitle(w())))
         .font(13)
         .lineLimit(1)
         .truncation("tail")
         .color(memo(() => (selected() ? "primary" : "secondary"))),
-      Spacer({ minLength: 0 }),
     ])
       .frame({ maxWidth: "infinity" }),
     ZStack({}, [
       // Unread badge at rest; on hover it yields to the close button.
-      Text(memo(() => (unread() > 0 ? String(unread()) : "")))
-        .font("caption2").bold().color("white")
-        .paddingHorizontal(memo(() => (unread() > 0 ? 5 : 0)))
-        .paddingVertical(memo(() => (unread() > 0 ? 1 : 0)))
-        .background(memo(() => (unread() > 0 ? "#E4573D" : null)))
-        .cornerRadius(7)
-        .hideOnHover(),
+      ForEach({ items: badge, key: (k) => k }, () =>
+        Text(memo(() => String(unread())))
+          .font("caption2").bold().color("white")
+          .paddingHorizontal(5)
+          .paddingVertical(1)
+          .background("#E4573D")
+          .cornerRadius(7)
+          .hideOnHover()),
       // Circular close: uniform padding around the glyph + full-round corner
       // (the background hugs content+padding, so padding IS the circle size).
       // The circle only paints while the X ITSELF is hovered (hoverBackground
@@ -1037,7 +1051,7 @@ function workspaceRow(w, e) {
         .onTap(() => closeWorkspace(w().id)),
     ]),
   ])
-    .paddingLeading(2)
+    .paddingLeading(memo(() => (state() ? 2 : 2 + ROW_DOT_SLOT)))
     .paddingTrailing(10)
     .paddingVertical(6)
     .marginLeading(memo(() => e().depth * INDENT))
