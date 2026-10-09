@@ -196,9 +196,9 @@ export function mountSidebar(state) {
     };
   };
 
-  // The full tree (the Reorderable, with drag keys) followed by the filtered
-  // flat list and its empty state: the top-level ForEach groups outside the
-  // Reorderable (rows have ForEach groups of their own inside).
+  // The tree (the Reorderable, with drag keys) followed by the empty-filter
+  // message: the top-level ForEach groups outside the Reorderable (rows have
+  // ForEach groups of their own inside).
   const listGroups = () => {
     const out = [];
     const walk = (nid) => {
@@ -224,7 +224,7 @@ export function mountSidebar(state) {
   const textsOf = (n) =>
     findDeep(n.id, (x) => x.type === "text" && x.props.text, { skipHidden: true }).map((x) => x.props.text);
 
-  // The filter chips at the top: tappable nodes outside both lists.
+  // The filter chips at the top: tappable nodes outside the lists.
   const chipNodes = () => {
     const inLists = new Set(findDeep(rootId, (n) => n.type === "reorderable" || n.type === "group")
       .flatMap((n) => findDeep(n.id, () => true).map((x) => x.id)));

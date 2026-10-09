@@ -23,11 +23,14 @@ badge, multi-select (⌘-click / ⇧-click), Close Others, and drag-and-drop.
   - **Active · N** shows only workspaces with an orange or green dot.
   - **Favorites · N** shows only favorite workspaces.
 
-  While either chip is on, the tree is replaced by one flat list in tab order. Each row keeps
-  its dot and gets a dim group path (`Work › Backend ›`). With both chips on,
-  a workspace shows if it matches either filter. Turn the chips off to get the tree back with
-  every group's collapse state unchanged. Filter state is local and resets when the sidebar
-  mounts.
+  Filters work on the tree in place. Workspace rows that don't match are hidden, but every
+  group header stays, with its collapse state, `+` button, and menu, so you can keep creating
+  workspaces. With both chips on, a workspace shows if it matches either. The open workspace
+  always shows: one you just created or opened stays until you open another, then hides if it
+  doesn't match. If no row matches, a dim message under the headers says so. Filter state is
+  local and resets when the sidebar mounts.
+- **New workspaces open at once.** A group's `+` (or **New Workspace in Group**) opens the new
+  workspace as soon as cmux creates it.
 - **Favorites.** Right-click a workspace → **Favorite** / **Unfavorite**. A favorite shows a red
   bookmark before its title. A favorite is the native cmux pin, so it persists, the built-in
   sidebar shows it as pinned, and cmux keeps it at the top of the tab order.

@@ -640,18 +640,18 @@ describe("filters", () => {
     return sb;
   };
 
-  test("Active shows only working and finished workspaces, flat, in tab order, with their group path", () => {
+  test("Active hides inactive rows in place and keeps every group header", () => {
     const sb = mixed();
     sb.chip("Active").tap();
-    assert.deepEqual(sb.outline(), ["A › B › b-one", "A › B › C › c-one"]);
+    assert.deepEqual(sb.outline(), ["A", "  B", "    b-one", "    C › c-one"]);
     assert.deepEqual([sb.row("b-one").indicator(), sb.row("c-one").indicator()], ["finished", "working"]);
     assert.deepEqual([sb.chip("Active").text, sb.chip("Active").on], ["Active · 2", true]);
   });
 
-  test("Favorites shows only pinned workspaces", () => {
+  test("Favorites hides non-favorite rows in place and keeps every group header", () => {
     const sb = mixed();
     sb.chip("Favorites").tap();
-    assert.deepEqual(sb.outline(), ["A › a-one"]);
+    assert.deepEqual(sb.outline(), ["A", "  a-one", "  B"]);
     assert.equal(sb.row("a-one").favorite(), true);
   });
 
@@ -659,7 +659,7 @@ describe("filters", () => {
     const sb = mixed();
     sb.chip("Active").tap();
     sb.chip("Favorites").tap();
-    assert.deepEqual(sb.outline(), ["A › a-one", "A › B › b-one", "A › B › C › c-one"]);
+    assert.deepEqual(sb.outline(), ["A", "  a-one", "  B", "    b-one", "    C › c-one"]);
   });
 
   test("turning the filter off restores the tree with collapse state untouched", () => {
@@ -672,28 +672,59 @@ describe("filters", () => {
     assert.deepEqual(sb.take(), []);
   });
 
-  test("an empty filtered list says so", () => {
+  test("a filter with no matching workspaces says so", () => {
     const sb = mountSidebar(tree3());
+    const headers = ["A", "  B", "    C"];
     sb.chip("Active").tap();
-    assert.deepEqual(sb.outline(), ["No active workspaces"]);
+    assert.deepEqual(sb.outline(), [...headers, "No active workspaces"]);
     sb.chip("Favorites").tap();
-    assert.deepEqual(sb.outline(), ["No active or favorite workspaces"]);
+    assert.deepEqual(sb.outline(), [...headers, "No active or favorite workspaces"]);
     sb.chip("Active").tap();
-    assert.deepEqual(sb.outline(), ["No favorite workspaces"]);
+    assert.deepEqual(sb.outline(), [...headers, "No favorite workspaces"]);
   });
 
-  test("a workspace joins the Active list when work starts and leaves once its finished turn is opened", () => {
+  test("under Active, an opened workspace stays until another one is opened", () => {
     const state = (x) => tree3({ x });
     const sb = mountSidebar(state({}));
     sb.chip("Active").tap();
     sb.setData(state({ agents: [agent("working")] }));
-    assert.deepEqual(sb.outline(), ["loose"]);
+    assert.deepEqual(sb.outline(), ["A", "  B", "    C", "loose"]);
     sb.setData(state({ agents: [agent("idle")] }));
     assert.equal(sb.row("loose").indicator(), "finished");
     sb.row("loose").tap();
-    assert.deepEqual(sb.take(), [{ method: "workspace.select", params: { workspace_id: "x" } }]);
-    assert.deepEqual(sb.outline(), ["No active workspaces"]);
+    assert.equal(sb.row("loose").indicator(), null);
+    assert.deepEqual(sb.outline(), ["A", "  B", "    C", "loose"]);
+    sb.row("A").tap();
+    assert.deepEqual(sb.take(), [
+      { method: "workspace.select", params: { workspace_id: "x" } },
+      { method: "workspace.select", params: { workspace_id: "a" } },
+    ]);
+    assert.deepEqual(sb.outline(), ["A", "  B", "    C", "No active workspaces"]);
   });
+
+  for (const [chip, empty] of [["Active", "No active workspaces"], ["Favorites", "No favorite workspaces"]]) {
+    test(`a workspace created under ${chip} opens at once and hides after you open another`, () => {
+      const t = tree3();
+      const withNew = (over = {}) => ({
+        ...t,
+        workspaces: workspaces(...t.workspaces, { id: "n", title: "fresh", group: "gC", ...over }),
+      });
+      const sb = mountSidebar(t);
+      sb.chip(chip).tap();
+      sb.row("C").tapImage("plus");
+      assert.deepEqual(sb.take(), [{ method: "workspace.group.new_workspace", params: { group_id: "gC" } }]);
+      sb.setData(withNew());
+      assert.deepEqual(sb.take(), [{ method: "workspace.select", params: { workspace_id: "n" } }]);
+      assert.deepEqual(sb.outline(), ["A", "  B", "    C", "      fresh"]);
+      sb.setData(withNew({ selected: true })); // the select echo
+      assert.deepEqual(sb.outline(), ["A", "  B", "    C", "      fresh"]);
+      sb.row("A").tap();
+      assert.deepEqual(sb.outline(), ["A", "  B", "    C", empty]);
+      // A workspace created elsewhere later is left alone.
+      sb.setData({ ...t, workspaces: workspaces(...withNew().workspaces, { id: "m", title: "other", group: "gC" }) });
+      assert.deepEqual(sb.take(), [{ method: "workspace.select", params: { workspace_id: "a" } }]);
+    });
+  }
 
   test("green dots survive toggling the filter", () => {
     const sb = mixed();

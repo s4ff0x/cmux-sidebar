@@ -148,11 +148,16 @@ function isSelected(w) {
   return !!w.selected;
 }
 
-function selectWorkspace(id) {
-  if (!id) return;
+// Opens a workspace; the row shows selected the same frame.
+function focusWorkspace(id) {
   selectOverride = id;
   setSelectTick(selectTick() + 1);
   cmux("workspace.select", { workspace_id: id });
+}
+
+function selectWorkspace(id) {
+  if (!id) return;
+  focusWorkspace(id);
   // cmux expands the selected workspace's collapsed group (anchors excepted).
   // A row listed under a collapsed header is opened in place, so collapse the
   // group straight back; the override keeps the expand echo from flashing.
@@ -256,10 +261,9 @@ function clearMultiSelect() {
   setMultiTick(multiTick() + 1);
 }
 
-// The rows currently on screen, in order: the filtered list or the tree.
+// The rows currently on screen, in order.
 function visibleRowIds() {
-  const entries = filtering() ? filteredEntries() : flatEntries();
-  return entries.filter((e) => e.kind === "ws").map((e) => e.wsId);
+  return flatEntries().filter((e) => e.kind === "ws").map((e) => e.wsId);
 }
 
 function handleRowClick(w, payload) {
@@ -604,6 +608,22 @@ function claimPendingSubgroup() {
 
 const isActiveId = (id) => isActive(wsSig(id)());
 
+// --- filters -------------------------------------------------------------------
+// Two toggles at the top: Active (orange or green dot) and Favorites (pinned).
+// They filter the tree in place: every group header stays (so its + and menu
+// still work) and only workspace rows hide. A row shows if it matches ANY
+// enabled filter, or is the open workspace, so a workspace you just created
+// or opened stays until you open another. Filter state is local and resets
+// when the sidebar mounts.
+const [filterActive, setFilterActive] = signal(false);
+const [filterFavorites, setFilterFavorites] = signal(false);
+const filtering = () => filterActive() || filterFavorites();
+
+function passesFilters(id) {
+  const w = wsSig(id)();
+  return isSelected(w) || (filterActive() && isActive(w)) || (filterFavorites() && !!w?.pinned);
+}
+
 // List entries by key. A row template reads its entry here instead of from
 // its item signal: reading the signal while the list mounts the row would
 // subscribe the whole list to that row's changes.
@@ -634,6 +654,7 @@ const flatEntries = memoJSON(() => {
   const t = groupTree();
   claimPendingSubgroup();
   const editing = editingId();
+  const hidden = (id) => filtering() && !passesFilters(id);
   const emit = (node, out) => {
     const hid = "h:" + node.key;
     const collapsed = nodeCollapsed(node);
@@ -652,17 +673,17 @@ const flatEntries = memoJSON(() => {
     });
     if (collapsed) {
       // Collapsed: only working and finished-unseen descendants stay,
-      // flattened under the header.
+      // flattened under the header (and only those the filters let through).
       for (const w of descendantsOf(node)) {
-        if (isActiveId(w.id)) {
+        if (isActiveId(w.id) && !hidden(w.id)) {
           out.push(wsEntry(w.id, editing, node.depth + 1, w.group, breadcrumb(w, node), node.key));
         }
       }
       return;
     }
     for (const item of node.items) {
-      if (item.ws) out.push(wsEntry(item.ws.id, editing, node.depth + 1, node.group.id, ""));
-      else emit(item.node, out);
+      if (!item.ws) emit(item.node, out);
+      else if (!hidden(item.ws.id)) out.push(wsEntry(item.ws.id, editing, node.depth + 1, node.group.id, ""));
     }
   };
 
@@ -670,6 +691,7 @@ const flatEntries = memoJSON(() => {
   const rest = [];
   for (const item of t.root.items) {
     if (item.ws) {
+      if (hidden(item.ws.id)) continue;
       (item.ws.pinned ? pinned : rest).push(wsEntry(item.ws.id, editing, 0, null, ""));
     } else {
       emit(item.node, item.node.group && item.node.group.pinned ? pinned : rest);
@@ -678,34 +700,12 @@ const flatEntries = memoJSON(() => {
   return keyed([...pinned, ...rest]);
 });
 
-// --- filters -------------------------------------------------------------------
-// Two toggles at the top: Active (orange or green dot) and Favorites (pinned).
-// While either is on, the tree gives way to one flat list, in tab order, of
-// the workspaces matching ANY enabled filter, each with its group path as a
-// dim breadcrumb. Filter state is local and resets when the sidebar mounts.
-const [filterActive, setFilterActive] = signal(false);
-const [filterFavorites, setFilterFavorites] = signal(false);
-const filtering = () => filterActive() || filterFavorites();
-
-const filteredEntries = memoJSON(() => {
-  if (!filtering()) return [];
-  const t = groupTree();
-  const editing = editingId();
-  const out = [];
-  for (const w of structure()) {
-    if ((filterActive() && isActiveId(w.id)) || (filterFavorites() && w.pinned)) {
-      out.push(wsEntry(w.id, editing, 0, w.group, breadcrumb(w, t.root)));
-    }
-  }
-  return keyed(out);
-});
-
 const activeCount = memo(() => structure().filter((w) => isActiveId(w.id)).length);
 const favoriteCount = memo(() => structure().filter((w) => w.pinned).length);
 
-// The empty filtered list says which filters came up empty.
+// Filters that leave no workspace rows say so, below the group headers.
 const emptyMessage = memo(() => {
-  if (!filtering() || filteredEntries().length > 0) return null;
+  if (!filtering() || flatEntries().some((e) => e.kind === "ws")) return null;
   if (filterActive() && filterFavorites()) return "No active or favorite workspaces";
   return filterActive() ? "No active workspaces" : "No favorite workspaces";
 });
@@ -1187,10 +1187,28 @@ function groupMenu(entry, e, g, withNode, toggle) {
 }
 
 // Same as the built-in header's `+`: a new workspace in that group, placed
-// by cmux (anchor cwd, configured placement).
+// by cmux (anchor cwd, configured placement). cmux creates it unselected and
+// the command returns nothing, so the sidebar opens it once it shows up in
+// the data. Opening it also keeps it visible under the Active filter.
+let pendingNew = null; // { groupId, known: Set of workspace ids at the click }
+
 function newWorkspaceIn(groupId) {
-  if (groupId) cmux("workspace.group.new_workspace", { group_id: groupId });
+  if (!groupId) return;
+  pendingNew = { groupId, known: new Set(wsList().map((w) => w.id)) };
+  cmux("workspace.group.new_workspace", { group_id: groupId });
 }
+
+computed(() => {
+  const ws = wsList();
+  if (!pendingNew) return;
+  const { groupId, known } = pendingNew;
+  const created = ws.find((w) => w.group === groupId && !known.has(w.id));
+  if (!created) return;
+  pendingNew = null;
+  // Plain focus, not selectWorkspace: cmux expands a collapsed group to show
+  // the new workspace, and that expand should stick.
+  focusWorkspace(created.id);
+});
 
 // Identical geometry to groupHeader (chevron box, paddings, semibold 12)
 // so entering/leaving rename changes nothing but the text becoming editable.
@@ -1223,7 +1241,7 @@ function groupEditRow(entry, e) {
     .fixed();
 }
 
-// One template for both lists. The entry comes from entryByKey: kind, ids,
+// The row template. The entry comes from entryByKey: kind, ids,
 // and editing are stable per key, and reading `e()` here would subscribe the
 // whole list to this row.
 function entryRow(e, key) {
@@ -1237,19 +1255,17 @@ function entryRow(e, key) {
 sidebar(() =>
   VStack({ spacing: 4 }, [
     filterBar(),
-    // The full tree; empty (no rows mounted) while a filter is on.
     Reorderable(
       {
-        items: () => (filtering() ? [] : flatEntries()),
+        items: flatEntries,
         key: (e) => e.id,
         spacing: 2,
         onMove: handleMove,
       },
       entryRow,
     ),
-    // The filtered flat list; mounts rows only while a filter is on.
+    // The empty-filter message.
     VStack({ spacing: 2 }, [
-      ForEach({ items: filteredEntries, key: (e) => e.id }, entryRow),
       ForEach(
         { items: memo(() => (emptyMessage() ? [emptyMessage()] : [])), key: (m) => m },
         (m) => Text(memo(() => m())).font(12).color("tertiary").paddingHorizontal(10).paddingVertical(6),
