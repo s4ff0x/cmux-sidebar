@@ -47,9 +47,9 @@ export const agent = (status, extra = {}) => ({
 
 // --- host ----------------------------------------------------------------------
 
-// `recentClock: true` turns the clock on through the Settings page, as a
-// user would; it is off by default.
-export function mountSidebar(state, { recentClock = false } = {}) {
+// `settings` overrides the SETTINGS block at the top of the sidebar, the way a
+// user edits it: `{ recentClock: true }`, `{ settingsPage: true }`.
+export function mountSidebar(state, settings = {}) {
   const nodes = new Map();
   const actions = [];
   let rootId = null;
@@ -106,7 +106,11 @@ export function mountSidebar(state, { recentClock = false } = {}) {
     ctx.__setData("selectedId", JSON.stringify(selected ? selected.id : ""));
   };
   setData(state);
-  vm.runInContext(fs.readFileSync(SOURCE_PATH, "utf8"), ctx, { filename: "cmux-sidebar.js" });
+  const source = fs.readFileSync(SOURCE_PATH, "utf8");
+  const settingsBlock = /^const SETTINGS = \{[\s\S]*?^\};$/m;
+  if (!settingsBlock.test(source)) throw new Error("no SETTINGS block in the sidebar source");
+  const edited = source.replace(settingsBlock, (block) => `${block}\nObject.assign(SETTINGS, ${JSON.stringify(settings)});`);
+  vm.runInContext(edited, ctx, { filename: "cmux-sidebar.js" });
 
   const node = (id) => nodes.get(id);
   const dispatch = (id, event, payload) =>
@@ -311,12 +315,6 @@ export function mountSidebar(state, { recentClock = false } = {}) {
     dispatch(toggle.id, "tap", {});
   };
 
-  if (recentClock) {
-    tapBarImage("gearshape");
-    tapSetting("Recently finished clock");
-    tapBarImage("gearshape");
-  }
-
   return {
     setData,
     rows,
@@ -338,6 +336,12 @@ export function mountSidebar(state, { recentClock = false } = {}) {
       dispatch(close.id, "tap", {});
     },
     tapBarImage,
+    // A double-click on the empty area under the list.
+    doubleTapEmptyArea() {
+      const area = node(rootId).children.map(node).find((n) => n.props.doubleTappable === true);
+      if (!area) throw new Error("no empty area");
+      dispatch(area.id, "doubletap", {});
+    },
     // Whether the top bar shows the bulk-close spinner.
     spinner: () => findDeep(barId(), (n) => n.type === "progress").length > 0,
     // The list's opacity: dimmed while a bulk close runs.

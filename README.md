@@ -27,15 +27,16 @@ badge, multi-select (⌘-click / ⇧-click), Close Others, and drag-and-drop.
   dot, and that turn's finish starts a new hour. A group header shows its anchor workspace's
   clock. It survives a sidebar mount in most cases (see the limits below). The sidebar tracks
   finishes while the clock is off, so turning it on shows the clocks of the last hour at once.
-- **Settings.** The gear at the right of the top bar opens the settings page in place of the
-  list; it holds the recently finished clock toggle. The cmux sidebar runtime has no storage, so
-  a change made there lasts until the sidebar mounts again (cmux launch, a source edit, a sidebar
-  switch). To keep a setting, change its default in the `SETTINGS` block at the top of
-  `~/.config/cmux/sidebars/cmux-sidebar.js`. An update replaces that file, so set it again after
-  updating.
+- **Settings.** Set them in the `SETTINGS` block at the top of
+  `~/.config/cmux/sidebars/cmux-sidebar.js`: `recentClock: true` turns on the recently finished
+  clock. An update replaces that file, so set them again after updating. The Settings page is
+  hidden for now: `settingsPage: true` shows a gear at the right of the top bar that opens it in
+  place of the list, with the recently finished clock toggle. The cmux sidebar runtime has no
+  storage, so a change made on that page lasts until the sidebar mounts again (cmux launch, a
+  source edit, a sidebar switch).
 - **Sidebar Guide.** The `?` at the right of the top bar, or **Sidebar Guide** at the end of any
-  right-click menu, shows a short guide to every icon, the top bar, the settings and the mouse, in
-  place of the list. Click the guide (or the `?`) to close it.
+  right-click menu, shows a short guide to every icon, the top bar and the mouse, in place of the
+  list. Click the guide (or the `?`) to close it.
 - **Filters.** Two toggle chips sit at the top of the sidebar:
   - **Active · N** shows only workspaces with an orange or green dot.
   - **Favorites · N** shows only favorite workspaces.
@@ -46,8 +47,8 @@ badge, multi-select (⌘-click / ⇧-click), Close Others, and drag-and-drop.
   always shows: one you just created or opened stays until you open another, then hides if it
   doesn't match. If no row matches, a dim message under the headers says so. Filter state is
   local and resets when the sidebar mounts.
-- **New workspaces open at once.** A group's `+` (or **New Workspace in Group**) opens the new
-  workspace as soon as cmux creates it.
+- **New workspaces open at once.** A group's `+` (or **New Workspace in Group**) and a
+  double-click on the empty area open the new workspace as soon as cmux creates it.
 - **Favorites.** Right-click a workspace → **Favorite** / **Unfavorite**. A favorite shows a red
   bookmark before its title. A favorite is the native cmux pin, so it persists, the built-in
   sidebar shows it as pinned, and cmux keeps it at the top of the tab order.
@@ -65,6 +66,10 @@ badge, multi-select (⌘-click / ⇧-click), Close Others, and drag-and-drop.
   when they come from a subgroup.
 - **Create inside a group.** Use the hover `+` on a group header, or right-click →
   **New Workspace in Group**. Right-click a workspace → **Move to Group** lists the full tree.
+- **Create at the top level.** Double-click the empty space under the list, as in the built-in
+  sidebar: a new workspace opens at the end of the list, outside every group. cmux puts a custom
+  sidebar inside a scroll view, so no view can reach down to the bottom edge; the empty area is a
+  160 pt band under the last row instead.
 - **Multi-select.** ⇧-click selects a range of rows: from the open workspace, or from your last
   click while a selection is already open. ⌘-click adds or removes one row. While 2 or more rows
   are selected, a **✕ Close N** chip shows at the right of the top bar and closes them all in one

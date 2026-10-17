@@ -80,7 +80,7 @@ describe("recently finished clock", () => {
   const CLOCK = { recentClock: true };
 
   test("the clock is off by default; Settings turns it on, for finishes seen while it was off too, and off again", () => {
-    const sb = mountSidebar(one(0, [agent("working")]));
+    const sb = mountSidebar(one(0, [agent("working")]), { settingsPage: true });
     sb.setData(one(10, [agent("idle")]));
     assert.equal(sb.row("job").recent(), false);
     const flip = () => {
@@ -489,6 +489,43 @@ describe("workspaces inside groups", () => {
       groups: [...t.groups, group("gX", "A/Extra", "e")],
     });
     assert.deepEqual(sb.row("loose").menuLabels("Move to Group"), ["A", "A › B", "A › B › C", "A › Extra"]);
+  });
+});
+
+describe("empty area", () => {
+  // tree3 with a-one open; cmux places a new workspace after the open one.
+  const open = () => tree3({ a1: { selected: true } });
+  const withNew = (at) => {
+    const ws = open().workspaces.map(({ index, ...w }) => w);
+    ws.splice(at, 0, { id: "n", title: "fresh" });
+    return { ...open(), workspaces: workspaces(...ws) };
+  };
+
+  test("a double-click creates a workspace outside every group, moves it to the end, and opens it", () => {
+    const sb = mountSidebar(open());
+    sb.doubleTapEmptyArea();
+    assert.deepEqual(sb.take(), [{ method: "workspace.create", params: {} }]);
+    sb.setData(withNew(2));
+    assert.deepEqual(sb.take(), [
+      { method: "workspace.reorder", params: { workspace_id: "n", index: "7" } },
+      { method: "workspace.select", params: { workspace_id: "n" } },
+    ]);
+    assert.deepEqual(sb.outline(), ["A", "  a-one", "  B", "    b-one", "    C", "      c-one", "loose", "fresh"]);
+  });
+
+  test("a workspace cmux already put at the end is only opened", () => {
+    const sb = mountSidebar(open());
+    sb.doubleTapEmptyArea();
+    sb.take();
+    sb.setData(withNew(7));
+    assert.deepEqual(sb.take(), [{ method: "workspace.select", params: { workspace_id: "n" } }]);
+  });
+
+  test("a double-click does nothing while a panel takes the list's place", () => {
+    const sb = mountSidebar(open());
+    sb.tapBarImage("questionmark.circle");
+    sb.doubleTapEmptyArea();
+    assert.deepEqual(sb.take(), []);
   });
 });
 
@@ -973,6 +1010,7 @@ describe("bulk close", () => {
     sb.row("three").tap();
     sb.row("three").doubleTap();
     sb.row("three").tapImage("xmark");
+    sb.doubleTapEmptyArea();
     sb.drop("w3", 0);
     assert.deepEqual([sb.take(), sb.outline()], [[], ["one", "three"]]);
   });
@@ -995,8 +1033,15 @@ describe("sidebar guide", () => {
     assert.notEqual(sb.guide(), null);
   });
 
-  test("the gear opens Settings in the list's place; the ? swaps in the guide; the ✕ closes Settings", () => {
+  test("the Settings gear and its guide line are hidden by default", () => {
     const sb = mountSidebar(tree3());
+    assert.throws(() => sb.tapBarImage("gearshape"), /no bar image gearshape/);
+    sb.tapBarImage("questionmark.circle");
+    assert.ok(!sb.guide().some((t) => t.includes("gear") || t.startsWith("Settings")));
+  });
+
+  test("the gear opens Settings in the list's place; the ? swaps in the guide; the ✕ closes Settings", () => {
+    const sb = mountSidebar(tree3(), { settingsPage: true });
     const outline = sb.outline();
     sb.tapBarImage("gearshape");
     assert.deepEqual([sb.settings() !== null, sb.outline()], [true, []]);

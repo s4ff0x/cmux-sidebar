@@ -19,13 +19,15 @@
 // Examples/CustomSidebars/workspaces.js, Copyright Manaflow, Inc.)
 
 // --- settings --------------------------------------------------------------------
-// Defaults for the Settings page (the gear in the top bar). The runtime has
-// no storage, so a change made there lasts until the sidebar mounts again
-// (cmux launch, a source edit, a sidebar switch). Change a value here to keep
-// it; an update replaces this file, so set it again after updating.
+// Change a value here to keep it; an update replaces this file, so set it
+// again after updating. The Settings page (the gear in the top bar) starts
+// from these values. The runtime has no storage, so a change made there lasts
+// until the sidebar mounts again (cmux launch, a source edit, a sidebar switch).
 const SETTINGS = {
   // The green clock before a workspace whose agent finished under an hour ago.
   recentClock: false,
+  // The gear in the top bar that opens the Settings page. Hidden for now.
+  settingsPage: false,
 };
 
 // --- change-only data ------------------------------------------------------------
@@ -577,6 +579,11 @@ const INDENT = 14;
 // A group's end slot (see flatEntries): with the list spacing, each one is a
 // 6pt drop slot, enough to aim for while barely opening a gap.
 const GROUP_END_HEIGHT = 4;
+// The band under the list where a double-click opens a new workspace. cmux
+// wraps the sidebar in a ScrollView, so no view can stretch down to the
+// bottom edge the way the built-in sidebar's empty area does; a fixed band
+// stands in for it.
+const EMPTY_AREA_HEIGHT = 160;
 // The group a dragged row would drop into: its header, and its rows lighter.
 const DROP_HEADER_TINT = "#4C9EEB4D";
 const DROP_ROW_TINT = "#4C9EEB1F";
@@ -961,7 +968,7 @@ function filterBar() {
           closeSelected,
           Image("xmark").font(8).weight("bold").color("secondary"),
         )),
-    panelIcon("gearshape", "Sidebar Settings", "settings"),
+    ...(SETTINGS.settingsPage ? [panelIcon("gearshape", "Sidebar Settings", "settings")] : []),
     panelIcon("questionmark.circle", "Sidebar Guide", "guide"),
   ])
     .paddingLeading(4)
@@ -1021,7 +1028,8 @@ function guideCard() {
     guideSection("ROWS"),
     guideLine(Circle({ size: 8 }).fill(WORKING_ORANGE), "An agent is working"),
     guideLine(Circle({ size: 8 }).fill(FINISHED_GREEN), "Finished while you were elsewhere; opening clears it"),
-    guideLine(recentClock(), "Finished under an hour ago; opening restarts the hour. Off by default: turn it on in Settings (the gear)"),
+    guideLine(recentClock(), "Finished under an hour ago; opening restarts the hour. Off by default: turn it on "
+      + (SETTINGS.settingsPage ? "in Settings (the gear)" : "with recentClock in SETTINGS at the top of cmux-sidebar.js")),
     guideLine(Image("bookmark.fill").font(10).color(FAVORITE_RED), "Favorite (pinned in cmux), listed first"),
     guideLine(Text("Title").font(11).weight("semibold").color(IMPORTANT_RED), "Important: Title Color → Red; the row keeps its place"),
     guideLine(
@@ -1037,10 +1045,11 @@ function guideCard() {
     guideLine(Circle({ size: 7 }).fill(WORKING_ORANGE), "Active: show only working and finished rows"),
     guideLine(Image("bookmark.fill").font(9).color(FAVORITE_RED), "Favorites: show only favorites"),
     guideLine(Image("xmark").font(8).weight("bold").color("secondary"), "Close N: close the selected rows; a spinner shows until they are gone"),
-    guideLine(Image("gearshape").font(10).color("secondary"), "Settings: turn on the recently finished clock"),
+    ...(SETTINGS.settingsPage ? [guideLine(Image("gearshape").font(10).color("secondary"), "Settings: turn on the recently finished clock")] : []),
     guideSection("MOUSE"),
     guideNote("Click opens. ⌘-click adds or removes a row from the selection; ⇧-click selects a range."),
     guideNote("Right-click acts on the row, or on the selection. Double-click renames."),
+    guideNote("Double-click the empty space under the list for a new workspace outside every group."),
     guideNote("The ✕ on hover closes at once, without asking."),
     guideNote("Drag to reorder: the group the row will land in lights up blue. Drop just below a group's last row to leave it; each step lower leaves one more level."),
   ]).onTap(() => setPanel(null));
@@ -1573,7 +1582,7 @@ function groupMenu(entry, e, g, withNode, toggle) {
 // by cmux (anchor cwd, configured placement). cmux creates it unselected and
 // the command returns nothing, so the sidebar opens it once it shows up in
 // the data. Opening it also keeps it visible under the Active filter.
-let pendingNew = null; // { groupId, known: Set of workspace ids at the click }
+let pendingNew = null; // { groupId (null: top level), known: Set of workspace ids at the click }
 
 function newWorkspaceIn(groupId) {
   if (!groupId) return;
@@ -1581,13 +1590,26 @@ function newWorkspaceIn(groupId) {
   cmux("workspace.group.new_workspace", { group_id: groupId });
 }
 
+// Same as a double-click on the built-in sidebar's empty area: a plain
+// workspace at the end of the list, outside every group, opened at once.
+// workspace.create places it after the open workspace, so the sidebar moves
+// it to the end once it shows up.
+function newTopLevelWorkspace() {
+  pendingNew = { groupId: null, known: new Set(wsList().map((w) => w.id)) };
+  cmux("workspace.create", {});
+}
+
 computed(() => {
   const ws = wsList();
   if (!pendingNew) return;
   const { groupId, known } = pendingNew;
-  const created = ws.find((w) => w.group === groupId && !known.has(w.id));
+  const created = ws.find((w) => (w.group ?? null) === groupId && !known.has(w.id));
   if (!created) return;
   pendingNew = null;
+  if (!groupId && ws[ws.length - 1].id !== created.id) {
+    setOrderOverride([...ws.map((w) => w.id).filter((id) => id !== created.id), created.id]);
+    cmux("workspace.reorder", { workspace_id: created.id, index: ws.length - 1 });
+  }
   // Plain focus, not selectWorkspace: cmux expands a collapsed group to show
   // the new workspace, and that expand should stick.
   focusWorkspace(created.id);
@@ -1661,6 +1683,11 @@ sidebar(() =>
         (m) => Text(memo(() => m())).font(12).color("tertiary").paddingHorizontal(10).paddingVertical(6),
       ),
     ]),
+    // The empty area: a double-click opens a new top-level workspace. A
+    // panel hides the list, so a workspace made there would open unseen.
+    Spacer()
+      .frame({ maxWidth: "infinity", height: EMPTY_AREA_HEIGHT })
+      .onDoubleTap(() => bulkClose() || panel() || newTopLevelWorkspace()),
   ]),
   { surface: "glass" },
 );
