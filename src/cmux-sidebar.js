@@ -141,8 +141,9 @@ const isImportant = (w) => IMPORTANT_COLORS.has(colorOf(w));
 // null: the default title color.
 const titleColor = (w) => (isImportant(w) ? IMPORTANT_RED : colorOf(w) || null);
 
-// A finished turn keeps its clock this long. Only time clears it: opening
-// the workspace, a new turn, or marking it important never do.
+// A finished turn keeps its clock this long, and opening the workspace
+// restarts the hour. Nothing else clears it: a new turn or marking it
+// important never do.
 const RECENT_SECONDS = 60 * 60;
 
 const isWorking = (w) =>
@@ -165,9 +166,7 @@ function activityDot(state, gap = 0) {
 // it; the gap clears a favorite's bookmark, which overhangs its own frame.
 // An outline glyph, so it never reads as the solid green dot.
 const CLOCK_SLOT = 18;
-// paddingTop lowers the glyph 1.5pt in its centered slot, onto the title's
-// optical center.
-const recentClock = () => Image("clock").font(10).weight("semibold").color(FINISHED_GREEN).paddingTop(3);
+const recentClock = () => Image("clock").font(10).weight("semibold").color(FINISHED_GREEN);
 
 // --- optimistic UI -------------------------------------------------------------
 // Every user action flips local state the same frame; the cmux command runs
@@ -195,6 +194,7 @@ function focusWorkspace(id) {
 
 function selectWorkspace(id) {
   if (!id) return;
+  restartClock(id); // also when the row was already open
   focusWorkspace(id);
   // cmux expands the selected workspace's collapsed group (anchors excepted).
   // A row listed under a collapsed header is opened in place, so collapse the
@@ -218,6 +218,7 @@ const finished = new Set(); // finished, not opened since: the green dot
 const finishedAt = new Map(); // id -> wall time of its last observed finish
 const recent = new Set(); // finished under RECENT_SECONDS ago: the clock
 let wasWorking = new Set();
+let openId; // the open workspace at the tracker's last pass
 
 // Wall time in epoch seconds. Stamps and expiry use it, never the host's
 // clock key, which is only as fresh as the last data push.
@@ -251,6 +252,7 @@ computed(() => {
   const now = wallNow();
   const working = new Set();
   const present = new Set();
+  let nowOpen = null;
   recent.clear();
   for (const w of ws) {
     present.add(w.id);
@@ -261,13 +263,20 @@ computed(() => {
       finishedAt.set(w.id, now);
       if (!isSelected(w)) finished.add(w.id);
     }
-    if (isSelected(w)) finished.delete(w.id); // opened: seen
     // The later of the observed and the recorded finish wins.
     const told = answeredAt(w, now);
     let at = finishedAt.get(w.id) ?? null;
     if (told !== null && (at === null || told > at)) finishedAt.set(w.id, (at = told));
+    if (isSelected(w)) {
+      finished.delete(w.id); // opened: seen
+      nowOpen = w.id;
+      // Opened since the last pass (outside the sidebar too): a new hour.
+      // The first pass after a mount opens nothing.
+      if (openId !== undefined && openId !== w.id && at !== null && now - at < RECENT_SECONDS) finishedAt.set(w.id, (at = now));
+    }
     if (at !== null && now - at < RECENT_SECONDS) recent.add(w.id);
   }
+  openId = nowOpen;
   for (const id of finished) if (!present.has(id)) finished.delete(id);
   // Only time drops a stamp: a workspace missing from one data push keeps it.
   for (const [id, at] of finishedAt) if (now - at >= RECENT_SECONDS) finishedAt.delete(id);
@@ -276,6 +285,11 @@ computed(() => {
   setRecentVersion(Array.from(recent).sort().join(","));
 });
 
+// Restarts a shown clock's hour.
+function restartClock(id) {
+  if (recent.has(id)) finishedAt.set(id, wallNow());
+}
+
 // "working" | "finished" | null
 function activity(w) {
   if (!w) return null;
@@ -283,7 +297,8 @@ function activity(w) {
   return finishedVersion() && finished.has(w.id) ? "finished" : null;
 }
 const isActive = (w) => activity(w) !== null;
-// Finished under an hour ago; unlike the green dot, opening keeps it.
+// Finished under an hour ago (or opened since); unlike the green dot,
+// opening keeps it.
 const isRecent = (w) => !!w && !!recentVersion() && recent.has(w.id);
 
 // Closed rows hide at once. cmux refuses a plain workspace.close for a pinned
@@ -544,6 +559,12 @@ function toggleNode(node) {
 // A parent path with no real group gets a virtual header.
 const SEP = "/";
 const INDENT = 14;
+// A group's end slot (see flatEntries): with the list spacing, each one is a
+// 6pt drop slot, enough to aim for while barely opening a gap.
+const GROUP_END_HEIGHT = 4;
+// The group a dragged row would drop into: its header, and its rows lighter.
+const DROP_HEADER_TINT = "#4C9EEB4D";
+const DROP_ROW_TINT = "#4C9EEB1F";
 const splitPath = (name) => String(name ?? "").split(SEP).map((s) => s.trim()).filter(Boolean);
 const joinPath = (segs) => segs.join(SEP);
 
@@ -845,9 +866,16 @@ const flatEntries = memoJSON(() => {
       }
       return;
     }
+    const start = out.length;
     for (const item of node.items) {
       if (!item.ws) emit(item.node, out);
       else if (!hidden(item.ws.id)) out.push(wsEntry(item.ws.id, editing, node.depth + 1, node.group.id, ""));
+    }
+    // The group's end: a thin slot at its parent's level, so a row dragged
+    // just below the group's last row leaves it. A run of ends steps out one
+    // level each.
+    if (out.length > start) {
+      out.push({ kind: "end", id: "end:" + node.key, nodeKey: node.key, depth: node.depth, container: realContainer(node.parent) });
     }
   };
 
@@ -918,75 +946,130 @@ function filterBar() {
           closeSelected,
           Image("xmark").font(8).weight("bold").color("secondary"),
         )),
+    Image("questionmark.circle")
+      .font(12).color(memo(() => (guideOpen() ? "primary" : "tertiary")))
+      .padding(3)
+      .cornerRadius(8)
+      .background(memo(() => (guideOpen() ? "#7f7f7f3d" : null)))
+      .hoverBackground(memo(() => (guideOpen() ? "#7f7f7f3d" : "#7f7f7f24")))
+      .help("Sidebar Guide")
+      .onTap(() => setGuideOpen(!guideOpen())),
   ])
     .paddingLeading(4)
+    .paddingTrailing(4)
     .paddingBottom(2);
+}
+
+// --- guide -------------------------------------------------------------------
+// What every icon means and how the mouse works, opened from the top bar's ?
+// or any right-click menu. It takes the list's place rather than sitting on
+// top of it: the sidebar scrolls as a whole, so only a short page brings it
+// into view from a menu opened far down the list.
+const [guideOpen, setGuideOpen] = signal(false);
+const openGuide = () => setGuideOpen(true);
+const guideMenuItems = () => [Divider(), Button("Sidebar Guide", openGuide)];
+
+const guideSection = (title) => Text(title).font(10).weight("semibold").color("tertiary").paddingTop(4);
+// An icon (or a sample), then what it means. The icon's slot is one text
+// line tall, so it stays beside the first line when the text wraps.
+const guideLine = (icon, text) =>
+  HStack({ spacing: 6, alignment: "top" }, [
+    HStack({ spacing: 0 }, [icon]).frame({ width: 30, height: 14 }),
+    Text(text).font(11).color("secondary"),
+  ]);
+const guideNote = (text) => Text(text).font(11).color("secondary");
+
+function guideCard() {
+  return VStack({ spacing: 5 }, [
+    HStack({ spacing: 6 }, [
+      Text("Sidebar Guide").font(13).weight("semibold"),
+      Spacer(),
+      Text("click to close").font(10).color("tertiary"),
+    ]),
+    guideSection("ROWS"),
+    guideLine(Circle({ size: 8 }).fill(WORKING_ORANGE), "An agent is working"),
+    guideLine(Circle({ size: 8 }).fill(FINISHED_GREEN), "Finished while you were elsewhere; opening clears it"),
+    guideLine(recentClock(), "Finished under an hour ago; opening restarts the hour"),
+    guideLine(Image("bookmark.fill").font(10).color(FAVORITE_RED), "Favorite (pinned in cmux), listed first"),
+    guideLine(Text("Title").font(11).weight("semibold").color(IMPORTANT_RED), "Important: Title Color → Red; the row keeps its place"),
+    guideLine(
+      Text("2").font("caption2").bold().color("white").paddingHorizontal(5).paddingVertical(1).background("#E4573D").cornerRadius(7),
+      "Unread notifications",
+    ),
+    guideLine(Text("B ›").font(11).color("tertiary"), "Group path of a row listed under a folded group"),
+    guideSection("GROUPS"),
+    guideLine(Image("chevron.down").font(10).weight("semibold").color("tertiary"), "Fold; a folded group still lists working and finished rows"),
+    guideLine(Text("A/B").font(11).color("tertiary"), "A group named A/B shows as B inside A"),
+    guideNote("Clicking a group header opens its first workspace."),
+    guideSection("TOP BAR"),
+    guideLine(Circle({ size: 7 }).fill(WORKING_ORANGE), "Active: show only working and finished rows"),
+    guideLine(Image("bookmark.fill").font(9).color(FAVORITE_RED), "Favorites: show only favorites"),
+    guideLine(Image("xmark").font(8).weight("bold").color("secondary"), "Close N: close the selected rows; a spinner shows until they are gone"),
+    guideSection("MOUSE"),
+    guideNote("Click opens. ⌘-click adds or removes a row from the selection; ⇧-click selects a range."),
+    guideNote("Right-click acts on the row, or on the selection. Double-click renames."),
+    guideNote("The ✕ on hover closes at once, without asking."),
+    guideNote("Drag to reorder: the group the row will land in lights up blue. Drop just below a group's last row to leave it; each step lower leaves one more level."),
+  ])
+    .padding(10)
+    .cornerRadius(10)
+    .background("#7f7f7f1f")
+    .frame({ maxWidth: "infinity" })
+    .onTap(() => setGuideOpen(false));
 }
 
 // --- drop resolution ---------------------------------------------------------
 // `index` is the dragged row's slot in the flat list (headers included).
-// `extra.side` resolves the ambiguous boundary slots: "above" nests with the
-// row above (e.g. last item of a group), "below" with the row below (right
-// after the group, outside it) - chosen by the pointer's X position mid-drag.
-function handleMove(id, index, extra) {
-  if (bulkClose()) return; // the list is frozen; its slots map to nothing
-  if (id.startsWith("h:")) {
-    moveGroup(id, index, extra && extra.side);
-    return;
-  }
-  const ws = wsList();
+// `side` resolves the ambiguous boundary slots: "above" nests with the row
+// above (e.g. last item of a group), "below" with the row below (right after
+// the group, outside it) - chosen by the pointer's X position mid-drag.
 
-  const dragged = ws.find((w) => w.id === id);
-  if (!dragged) return;
-
-  // Dragging a row that is part of the multi-selection moves the WHOLE
-  // selection: the visible selected rows gather contiguously at the drop
-  // slot (visual order preserved) and all take the slot's container. This is
-  // the platform-standard resolution for non-contiguous selections and for
-  // selections mixing in-group and ungrouped rows. Hidden rows (inside a
-  // collapsed group) never move - what you see is what you drag.
+// Dragging a row that is part of the multi-selection moves the WHOLE
+// selection: the visible selected rows gather contiguously at the drop slot
+// (visual order preserved) and all take the slot's container. This is the
+// platform-standard resolution for non-contiguous selections and for
+// selections mixing in-group and ungrouped rows. Hidden rows (inside a
+// collapsed group) never move - what you see is what you drag.
+function isBulkDrag(id) {
   multiTick();
-  const bulk = multiSelected.has(id) && multiSelected.size > 1;
-  const movingIds = bulk
-    ? visibleRowIds().filter((rid) => multiSelected.has(rid) || rid === id)
-    : [id];
-  const moving = new Set(movingIds);
+  return multiSelected.has(id) && multiSelected.size > 1;
+}
 
+function movingRows(id) {
+  return isBulkDrag(id) ? visibleRowIds().filter((rid) => multiSelected.has(rid) || rid === id) : [id];
+}
+
+// Where a row drop lands: the slot's container (the deepest real group it
+// sits in, null for the top level), the collapsed group whose list it is in,
+// and the next entry that stays put. Shared by the drop and the drag
+// highlight.
+function rowDrop(id, index, side, moving) {
   const entries = flatEntries().filter((e) => e.id !== id);
-  // Neighbors that will NOT move: rows moving with the drag can't define the
-  // drop's container or anchor.
-  let prev = null;
-  for (let i = index - 1; i >= 0; i -= 1) {
-    const e = entries[i];
-    if (e.kind === "ws" && moving.has(e.wsId ?? e.id)) continue;
-    prev = e;
-    break;
-  }
+  // Rows moving with the drag can't define the container or anchor.
   const stays = (e) => !(e.kind === "ws" && moving.has(e.wsId ?? e.id));
-  // The drop's tabs-order anchor is the next entry that stays put. A header
-  // resolves to its group's first tab: dropping above a group means "before
-  // the whole block", never "between its anchor and members" (which would
-  // break contiguity and get normalized somewhere else).
+  let prev = null;
+  for (let i = index - 1; i >= 0 && !prev; i -= 1) if (stays(entries[i])) prev = entries[i];
+  // The drop's tabs-order anchor. A header resolves to its group's first
+  // tab: dropping above a group means "before the whole block", never
+  // "between its anchor and members" (which would break contiguity and get
+  // normalized somewhere else).
   const nextEntry = entries.slice(index).find((e) => {
     if (e.kind === "header") return !moving.has(e.refId);
     return e.kind === "ws" && stays(e);
-  });
+  }) ?? null;
   const nextAny = entries.slice(index).find(stays) ?? null;
-  const nextRefId = nextEntry ? (nextEntry.kind === "header" ? nextEntry.refId : nextEntry.wsId) : null;
-  const nextWorkspace = nextRefId ? ws.find((w) => w.id === nextRefId) : null;
 
-  // The container is the deepest real group the slot sits in.
   let container;
   // A slot inside a collapsed group's flattened list (right under its header,
   // or next to one of its listed rows): its rows come from many subgroups, so
   // the neighbor says nothing about membership. Rows from that subtree keep
   // their group; anything else lands beside the collapsed group.
   let collapsedScope = null;
-  if (extra && extra.side === "below") {
+  if (side === "below") {
     // Nest with what's below: a header below means "beside that group", i.e.
-    // in its parent; a row below means that row's group.
+    // in its parent; a row or a group's end means its level.
     if (!nextAny) container = null;
-    else container = nextAny.kind === "ws" ? nextAny.container : nextAny.outer;
+    else container = nextAny.kind === "header" ? nextAny.outer : nextAny.container;
     if (nextAny && nextAny.collapsedUnder) collapsedScope = nodeByKey(nextAny.collapsedUnder);
   } else {
     container = prev ? prev.container : null;
@@ -994,6 +1077,36 @@ function handleMove(id, index, extra) {
     if (prev && prev.collapsedUnder) collapsedScope = nodeByKey(prev.collapsedUnder);
   }
   if (collapsedScope) container = realContainer(collapsedScope.parent);
+  return { container, collapsedScope, nextEntry };
+}
+
+// The group a row drag in flight would drop into, so it lights up: a group
+// id, null for the top level (nothing lit), undefined with no drag. The host
+// reports each slot and side change, never pointer motion.
+const [dropGroup, setDropGroup] = signal(undefined);
+
+function handleDragChange(drag) {
+  if (!drag || drag.id.startsWith("h:") || !wsList().some((w) => w.id === drag.id)) {
+    setDropGroup(undefined);
+    return;
+  }
+  setDropGroup(rowDrop(drag.id, drag.index, drag.side, new Set(movingRows(drag.id))).container);
+}
+
+function handleMove(id, index, extra) {
+  if (bulkClose()) return; // the list is frozen; its slots map to nothing
+  if (id.startsWith("h:")) {
+    moveGroup(id, index, extra && extra.side);
+    return;
+  }
+  const ws = wsList();
+  const dragged = ws.find((w) => w.id === id);
+  if (!dragged) return; // gone, or a group's end slot
+  const bulk = isBulkDrag(id);
+  const movingIds = movingRows(id);
+  const { container, collapsedScope, nextEntry } = rowDrop(id, index, extra && extra.side, new Set(movingIds));
+  const nextRefId = nextEntry ? (nextEntry.kind === "header" ? nextEntry.refId : nextEntry.wsId) : null;
+  const nextWorkspace = nextRefId ? ws.find((w) => w.id === nextRefId) : null;
 
   const { byGroupId } = groupTree();
   const inScope = (row) => !!collapsedScope && isWithin(byGroupId.get(row.group), collapsedScope);
@@ -1051,6 +1164,7 @@ function moveGroup(id, index, side) {
   if (!node) return;
   let end = at + 1;
   while (end < all.length && all[end].depth > node.depth) end += 1;
+  if (all[end]?.kind === "end" && all[end].nodeKey === node.key) end += 1; // its own end slot
   const own = new Set(all.slice(at, end).map((e) => e.id));
   const entries = all.filter((e) => e.id !== id);
   const { root, byGroupId } = groupTree();
@@ -1064,12 +1178,13 @@ function moveGroup(id, index, side) {
     const next = entries[index];
     if (next && own.has(next.id)) return;
     if (!next) parent = root;
-    else parent = next.kind === "header" ? nodeByKey(next.nodeKey).parent : rowLevel(next);
+    else parent = next.kind === "ws" ? rowLevel(next) : nodeByKey(next.nodeKey).parent;
   } else {
     const prev = entries[index - 1];
     if (prev && own.has(prev.id)) return;
     if (!prev) parent = root;
     else if (prev.kind === "header") parent = prev.collapsed ? nodeByKey(prev.nodeKey).parent : nodeByKey(prev.nodeKey);
+    else if (prev.kind === "end") parent = nodeByKey(prev.nodeKey).parent;
     else parent = rowLevel(prev);
   }
   // Released in its own slot under the same parent: nothing moved.
@@ -1087,11 +1202,11 @@ function moveGroup(id, index, side) {
   const ws = wsList();
   const rest = ws.filter((w) => !moving.has(w.id));
   // The next entry that stays put anchors the drop; a header stands for its
-  // first tab. Rows listed under a collapsed header map to no tab position.
-  // A header whose first tab is in the moving subtree (a virtual ancestor of
-  // the dragged group) can't anchor it.
+  // first tab. Rows listed under a collapsed header, and group ends, map to
+  // no tab position. A header whose first tab is in the moving subtree (a
+  // virtual ancestor of the dragged group) can't anchor it.
   const next = entries.slice(index).find((e) =>
-    !own.has(e.id) && !e.collapsedUnder && !(e.kind === "header" && moving.has(e.refId)));
+    e.kind !== "end" && !own.has(e.id) && !e.collapsedUnder && !(e.kind === "header" && moving.has(e.refId)));
   const nextId = next ? (next.kind === "header" ? next.refId : next.wsId) : null;
   let insertAt = nextId ? rest.findIndex((w) => w.id === nextId) : rest.length;
   if (insertAt < 0) insertAt = rest.length;
@@ -1171,6 +1286,7 @@ function workspaceMenu(w) {
       closeMany(bulkIds(w()));
       clearMultiSelect();
     }).destructive(),
+    ...guideMenuItems(),
   ];
 }
 
@@ -1182,6 +1298,7 @@ const ROW_DOT_SLOT = 18;
 function workspaceRow(w, e) {
   const selected = memo(() => isSelected(w()));
   const multi = memo(() => isMultiSelected(w()));
+  const dropHere = memo(() => !!dropGroup() && dropGroup() === e().container);
   const unread = memo(() => w()?.unread ?? 0);
   const pinned = memo(() => !!w()?.pinned);
   const crumb = memo(() => e().crumb);
@@ -1249,12 +1366,12 @@ function workspaceRow(w, e) {
     .paddingVertical(6)
     .marginLeading(memo(() => e().depth * INDENT))
     .cornerRadius(8)
-    .background(memo(() => (multi() ? "#4C9EEB33" : (selected() ? "#7f7f7f3d" : null))))
+    .background(memo(() => (multi() ? "#4C9EEB33" : dropHere() ? DROP_ROW_TINT : selected() ? "#7f7f7f3d" : null)))
     .hoverBackground(memo(() => (multi() ? "#4C9EEB33" : (selected() ? "#7f7f7f3d" : "#7f7f7f24"))))
     .frame({ maxWidth: "infinity" })
     .dragSet(memo(() => (multi() ? "multi" : null)))
     .onTap((payload) => handleRowClick(w(), payload))
-    .onDoubleTap(() => setEditingId(w().id))
+    .onDoubleTap(() => bulkClose() || setEditingId(w().id))
     .contextMenu(workspaceMenu(w));
 }
 
@@ -1292,6 +1409,7 @@ function groupHeader(entry, e) {
   const anchorId = memo(() => (groupId ? g().anchorId : null));
   const anchor = () => (anchorId() ? wsSig(anchorId())() : undefined);
   const selected = memo(() => isSelected(anchor()));
+  const dropHere = memo(() => !!groupId && dropGroup() === groupId);
   const state = memo(() => activity(anchor()));
   const recentShown = memo(() => isRecent(anchor()));
   // The anchor's dot and clock mount only while shown, like a row's.
@@ -1302,7 +1420,8 @@ function groupHeader(entry, e) {
     const node = nodeByKey(nodeKey);
     if (node) fn(node);
   };
-  const toggle = withNode(toggleNode);
+  // Folding mid bulk close would move the frozen list (see closeMany).
+  const toggle = withNode((node) => bulkClose() || toggleNode(node));
   return HStack({ spacing: 6 }, [
     // The chevron toggles collapse; clicking anywhere else selects the
     // group's anchor workspace (built-in sidebar behavior). Chevron only,
@@ -1335,18 +1454,18 @@ function groupHeader(entry, e) {
       .showOnHover()
       .opacity(groupId ? 1 : 0)
       .help("New Workspace in Group")
-      .onTap(() => newWorkspaceIn(groupId)),
+      .onTap(() => bulkClose() || newWorkspaceIn(groupId)),
   ])
     .paddingLeading(8)
     .paddingTrailing(10)
     .paddingVertical(5)
     .marginLeading(memo(() => e().depth * INDENT))
     .cornerRadius(8)
-    .background(memo(() => (selected() ? "#7f7f7f3d" : null)))
+    .background(memo(() => (dropHere() ? DROP_HEADER_TINT : selected() ? "#7f7f7f3d" : null)))
     .hoverBackground(memo(() => (selected() ? "#7f7f7f3d" : "#7f7f7f1c")))
     .frame({ maxWidth: "infinity" })
     .onTap(() => bulkClose() || selectWorkspace(anchor()?.id))
-    .onDoubleTap(() => setEditingId(hid))
+    .onDoubleTap(() => bulkClose() || setEditingId(hid))
     .contextMenu(groupMenu(entry, e, g, withNode, toggle));
 }
 
@@ -1372,7 +1491,7 @@ function groupMenu(entry, e, g, withNode, toggle) {
     Button("Move to Top Level", withNode((node) => repath(node, leafSegs(node)))),
   ];
   // A virtual header has no cmux group to pin, ungroup, or delete.
-  if (!groupId) return items;
+  if (!groupId) return [...items, ...guideMenuItems()];
   return [
     Button("New Workspace in Group", () => newWorkspaceIn(groupId)),
     ...items,
@@ -1381,6 +1500,7 @@ function groupMenu(entry, e, g, withNode, toggle) {
       cmux(g().pinned ? "workspace.group.unpin" : "workspace.group.pin", { group_id: groupId })),
     Button("Ungroup", withNode((node) => dissolve(node, "workspace.group.ungroup"))),
     Button("Delete Group", withNode((node) => dissolve(node, "workspace.group.delete"))).destructive(),
+    ...guideMenuItems(),
   ];
 }
 
@@ -1445,6 +1565,9 @@ function groupEditRow(entry, e) {
 function entryRow(e, key) {
   const entry = entryByKey.get(key);
   if (entry.kind === "header") return entry.editing ? groupEditRow(entry, e) : groupHeader(entry, e);
+  // A group's end: empty, so nothing grabs it; its margin is the level a
+  // row dropped there takes (the host reads nesting from marginLeading).
+  if (entry.kind === "end") return Spacer().frame({ height: GROUP_END_HEIGHT }).marginLeading(memo(() => e().depth * INDENT));
   const w = wsSig(entry.wsId);
   return entry.editing ? workspaceEditRow(w, e) : workspaceRow(w, e);
 }
@@ -1453,19 +1576,22 @@ function entryRow(e, key) {
 sidebar(() =>
   VStack({ spacing: 4 }, [
     filterBar(),
+    ForEach({ items: memo(() => (guideOpen() ? ["guide"] : [])), key: (k) => k }, guideCard),
     Reorderable(
       {
-        items: flatEntries,
+        // Empty while the guide is open: it takes the list's place.
+        items: memo(() => (guideOpen() ? [] : flatEntries())),
         key: (e) => e.id,
         spacing: 2,
         onMove: handleMove,
+        onDragChange: handleDragChange,
       },
       entryRow,
     ).opacity(memo(() => (bulkClose() ? 0.5 : 1))),
     // The empty-filter message.
     VStack({ spacing: 2 }, [
       ForEach(
-        { items: memo(() => (emptyMessage() ? [emptyMessage()] : [])), key: (m) => m },
+        { items: memo(() => (emptyMessage() && !guideOpen() ? [emptyMessage()] : [])), key: (m) => m },
         (m) => Text(memo(() => m())).font(12).color("tertiary").paddingHorizontal(10).paddingVertical(6),
       ),
     ]),

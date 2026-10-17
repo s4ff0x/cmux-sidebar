@@ -78,15 +78,27 @@ describe("recently finished clock", () => {
   const HOUR = 3600;
   const one = (now, agents, extra = {}) => ({ now, workspaces: workspaces({ id: "w1", title: "job", agents, ...extra }) });
 
-  test("a finished turn keeps its clock after the workspace is opened, until an hour has passed", () => {
-    const sb = mountSidebar(one(1000, [agent("working")]));
+  test("opening the workspace, in the sidebar or in cmux, restarts its clock's hour", () => {
+    const two = (now, open, status = "idle") => ({
+      now,
+      workspaces: workspaces(
+        { id: "w1", title: "job", agents: [agent(status)], selected: open === "w1" },
+        { id: "w2", title: "other", selected: open === "w2" },
+      ),
+    });
+    const sb = mountSidebar(two(0, "w2", "working"));
     assert.equal(sb.row("job").recent(), false);
-    sb.setData(one(1000, [agent("idle")]));
+    sb.setData(two(0, "w2"));
     assert.deepEqual([sb.row("job").indicator(), sb.row("job").recent()], ["finished", true]);
+    sb.setData(two(1800, "w2"));
     sb.row("job").tap();
-    sb.setData(one(1000 + HOUR - 60, [agent("idle")], { selected: true }));
+    sb.setData(two(1800 + HOUR - 60, "w1"));
     assert.deepEqual([sb.row("job").indicator(), sb.row("job").recent()], [null, true]);
-    sb.setData(one(1000 + HOUR, [agent("idle")], { selected: true }));
+    sb.setData(two(1800 + HOUR - 30, "w2"));
+    sb.setData(two(1800 + HOUR - 10, "w1")); // opened outside the sidebar
+    sb.setData(two(1800 + 2 * HOUR - 11, "w1"));
+    assert.equal(sb.row("job").recent(), true);
+    sb.setData(two(1800 + 2 * HOUR - 10, "w1"));
     assert.equal(sb.row("job").recent(), false);
   });
 
@@ -559,14 +571,16 @@ describe("drag and drop", () => {
     assert.deepEqual(sb.outline(), ["B", "  b-one", "  C", "    c-one", "A", "  a-one", "loose"]);
   });
 
-  test("at a group's end the pointer side decides between staying in and moving out", () => {
-    // Without C's header: [A, a-one, B, b-one, c-one, loose]; slot 5 follows C's own row.
-    const out = mountSidebar(tree3());
-    out.drop("h:g:gC", 5, { side: "below" });
-    assert.deepEqual(out.take(), [{ method: "workspace.group.rename", params: { group_id: "gC", name: "C" } }]);
-    const stay = mountSidebar(tree3());
-    stay.drop("h:g:gC", 5, { side: "above" });
-    assert.deepEqual(stay.take(), []);
+  test("a group dropped past the group ends below it steps out one level per end", () => {
+    // Without C's header: [A, a-one, B, b-one, c-one, end C, end B, end A, loose].
+    const renames = (index, side = "above") => {
+      const sb = mountSidebar(tree3());
+      sb.drop("h:g:gC", index, { side });
+      return sb.take().filter((a) => a.method === "workspace.group.rename").map((a) => a.params.name);
+    };
+    assert.deepEqual([renames(5), renames(6), renames(7), renames(8)], [[], [], ["A/C"], ["C"]]);
+    // Between two ends the pointer side picks the outer one.
+    assert.deepEqual(renames(7, "below"), ["C"]);
   });
 
   test("a group dropped inside its own subtree stays put", () => {
@@ -610,7 +624,7 @@ describe("drag and drop", () => {
     const original = sb.outline();
     sb.drop("h:g:gD", 0); // to the top
     sb.take();
-    sb.drop("h:g:gD", 4); // back between loose and loose2, before any echo
+    sb.drop("h:g:gD", 6); // back between loose and loose2 ([d-one, end D, A, a-one, end A, loose]), before any echo
     assert.deepEqual(sb.take(), [
       { method: "workspace.reorder_many", params: { workspace_ids: JSON.stringify(["a", "a1", "x", "d", "d1", "y"]) } },
     ]);
@@ -646,7 +660,7 @@ describe("drag and drop", () => {
       groups: [group("gZ", "A/Z", "z"), group("gA", "A", "a")],
     });
     assert.deepEqual(sb.outline(), ["A", "  Z", "    zed", "  a-one", "loose"]);
-    sb.drop("h:g:gA", 4); // below loose
+    sb.drop("h:g:gA", 6); // below loose ([Z, zed, end Z, a-one, end A, loose])
     assert.deepEqual(sb.take(), [{
       method: "workspace.reorder_many",
       params: { workspace_ids: JSON.stringify(["x", "a", "a1", "z", "z1"]) },
@@ -670,6 +684,49 @@ describe("drag and drop", () => {
     const sb = mountSidebar(tree3({ gA: { collapsed: true }, a1: { agents: [agent("working")] } }));
     sb.drop("x", 2); // under a-one, inside collapsed A's list
     assert.deepEqual(adds(sb.take()), []); // stays ungrouped instead of vanishing into A
+  });
+});
+
+describe("dragging out of a group", () => {
+  // Without c-one: [A, a-one, B, b-one, C, end C, end B, end A, loose].
+  const groupOps = (index, side = "above") => {
+    const sb = mountSidebar(tree3());
+    sb.drop("c1", index, { side });
+    return sb.take().filter((a) => a.method.startsWith("workspace.group.")).map((a) => a.params.group_id ?? "none");
+  };
+
+  test("a row dropped below its group's last row leaves it, one level per group end", () => {
+    assert.deepEqual([groupOps(5), groupOps(6), groupOps(7), groupOps(8)], [[], ["gB"], ["gA"], ["none"]]);
+  });
+
+  test("at a group's last row the pointer side picks staying in or the next level out", () => {
+    assert.deepEqual([groupOps(5, "above"), groupOps(5, "below")], [[], ["gB"]]);
+  });
+
+  test("the last group in the list can be left too", () => {
+    const sb = mountSidebar({
+      workspaces: workspaces({ id: "x", title: "loose" }, { id: "g", title: "G", group: "gG" }, { id: "g1", title: "g-one", group: "gG" }),
+      groups: [group("gG", "G", "g")],
+    });
+    sb.drop("g1", 3); // [loose, G, end G] - below G's end
+    assert.deepEqual(sb.take(), [
+      { method: "workspace.group.remove", params: { workspace_id: "g1" } },
+      { method: "workspace.reorder", params: { workspace_id: "g1", index: "2" } },
+    ]);
+  });
+
+  test("while a row is dragged, the group it would drop into lights up", () => {
+    const sb = mountSidebar(tree3());
+    const lit = () => sb.rows().filter((r) => r.background === "#4C9EEB4D" || r.background === "#4C9EEB1F").map((r) => r.text);
+    sb.dragOver("c1", 5);
+    assert.deepEqual(lit(), ["C", "c-one"]);
+    sb.dragOver("c1", 6);
+    assert.deepEqual(lit(), ["B", "b-one"]);
+    sb.dragOver("c1", 8); // the top level: nothing lit
+    assert.deepEqual(lit(), []);
+    sb.dragOver("c1", 7);
+    sb.dragEnd();
+    assert.deepEqual(lit(), []);
   });
 });
 
@@ -893,14 +950,33 @@ describe("bulk close", () => {
     ]);
   });
 
-  test("clicks and drags do nothing while it runs", () => {
+  test("clicks, double-clicks and drags do nothing while it runs", () => {
     const sb = mountSidebar(state(0));
     closeTwoAndFour(sb);
     sb.take();
     sb.row("three").tap();
+    sb.row("three").doubleTap();
     sb.row("three").tapImage("xmark");
     sb.drop("w3", 0);
     assert.deepEqual([sb.take(), sb.outline()], [[], ["one", "three"]]);
+  });
+});
+
+describe("sidebar guide", () => {
+  test("the top bar's ? and every right-click menu open the guide in the list's place; a click closes it", () => {
+    const sb = mountSidebar(tree3());
+    const outline = sb.outline();
+    assert.equal(sb.guide(), null);
+    sb.tapBarImage("questionmark.circle");
+    assert.ok(sb.guide().includes("Finished under an hour ago; opening restarts the hour"));
+    assert.deepEqual(sb.outline(), []);
+    sb.tapGuide();
+    assert.deepEqual([sb.guide(), sb.outline()], [null, outline]);
+    sb.row("c-one").menu("Sidebar Guide");
+    assert.notEqual(sb.guide(), null);
+    sb.tapBarImage("questionmark.circle"); // the ? closes it too
+    sb.row("B").menu("Sidebar Guide");
+    assert.notEqual(sb.guide(), null);
   });
 });
 

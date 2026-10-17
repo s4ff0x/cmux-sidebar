@@ -20,11 +20,15 @@ badge, multi-select (⌘-click / ⇧-click), Close Others, and drag-and-drop.
   workspace whose turn **finished while you were elsewhere**; it stays green until you open that
   workspace. A group header shows its own anchor workspace's dot; headers show no counts.
 - **Recently finished clock.** A green clock icon before the title marks a workspace whose agent
-  finished a turn less than an hour ago, whether you were there or elsewhere. Only time clears
-  it, an hour after the latest finish: opening the workspace, marking it important, or a new turn
-  never do. During a new turn the clock stays beside the orange dot, and that turn's finish
-  starts a new hour. A group header shows its anchor workspace's clock. It survives a sidebar
-  mount in most cases (see the limits below).
+  finished a turn less than an hour ago, whether you were there or elsewhere. It hides an hour
+  after the latest finish, and opening the workspace (in the sidebar or anywhere in cmux)
+  restarts that hour. Marking it important or a new turn never clear it. During a new turn the
+  clock stays beside the orange dot, and that turn's finish starts a new hour. A group header
+  shows its anchor workspace's clock. It survives a sidebar mount in most cases (see the limits
+  below).
+- **Sidebar Guide.** The `?` at the right of the top bar, or **Sidebar Guide** at the end of any
+  right-click menu, shows a short guide to every icon, the top bar and the mouse, in place of the
+  list. Click the guide (or the `?`) to close it.
 - **Filters.** Two toggle chips sit at the top of the sidebar:
   - **Active · N** shows only workspaces with an orange or green dot.
   - **Favorites · N** shows only favorite workspaces.
@@ -60,6 +64,11 @@ badge, multi-select (⌘-click / ⇧-click), Close Others, and drag-and-drop.
   click; right-click a selected row → **Close N Workspaces** does the same. ⌘W cannot: cmux sends
   custom sidebars no key events, and ⌘W is cmux's own **Close Tab**, which closes the focused
   terminal tab.
+- **Drag and drop.** Drag a row to reorder it, or into or out of a group. While you drag, the
+  group the row will land in lights up blue: its header strongly, its rows lightly; nothing lights
+  up for the top level. Below each open group's last row sits a thin gap: drop the row past it to
+  leave the group. Where several groups end together, each gap below steps out one more level.
+  At a group's last row the pointer's X position still works too: drag left to land one level out.
 - **Bulk close is one step.** Closing several workspaces hides them all at once. Until cmux has
   closed every one, a spinner shows in the top bar and the list stays still and dimmed, ignoring
   clicks and drags, so rows never vanish one by one or jump. If the open workspace is among
@@ -133,7 +142,8 @@ sidebar and back (`cmux sidebar reload` with an unchanged file does not remount)
   that prompt (so the prompt got its answer). The hour then runs from that answer, through any
   later turns. The data can't tell in three cases, so they show no clock after a mount: the
   prompt was more than an hour ago (a long turn, or turns that ran on without a new prompt), an
-  agent is mid-turn at the mount, or the agent was quit since.
+  agent is mid-turn at the mount, or the agent was quit since. A restart from opening the
+  workspace lives in memory too, so after a mount the hour runs from the answer again.
 
 Toggling a filter chip remounts rows but not the sidebar, so both survive it. The hour is
 measured on the wall clock and checked once a minute, so a clock icon can stay up to a minute past
@@ -161,8 +171,8 @@ the separator:
   - **Ungroup** and **Delete Group** dissolve the group the cmux way: member workspaces are
     kept. Its direct subgroups move up one level.
 - Drag a header to move a group with its whole subtree. Drop it right under another group's
-  header (or among its rows) to nest it there; at the end of a group, the pointer's X position
-  picks between staying inside and moving out a level. Dropping at the top level un-nests it.
+  header (or among its rows) to nest it there; past the gaps under a group's last row it moves
+  out one level per gap. Dropping at the top level un-nests it.
 - Tradeoff: the built-in cmux sidebar shows the full names (`Work/Backend`).
 
 ## Development

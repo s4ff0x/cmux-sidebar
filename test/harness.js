@@ -175,6 +175,7 @@ export function mountSidebar(state) {
         return found.props.color;
       },
       highlighted: !!n.props.background,
+      background: n.props.background ?? null,
       texts: visibleTexts,
       text: visibleTexts.join(" "),
       indent: n.props.marginLeading ?? 0,
@@ -235,11 +236,16 @@ export function mountSidebar(state) {
     walk(rootId);
     return out;
   };
+  // The open guide card, which sits outside the list; null while closed.
+  const guideNode = () =>
+    listGroups().flatMap((g) => g.children).map(node).find((n) => textsOf(n)[0] === "Sidebar Guide") ?? null;
+  // Group end slots (empty drop slots) and the guide are not rows.
   const rows = () => {
     const l = list();
     const keys = JSON.parse(l.props.itemKeys ?? "[]");
-    const tree = l.children.map((id, i) => makeRow(node(id), keys[i]));
-    const flat = listGroups().flatMap((g) => g.children.map((id) => makeRow(node(id), null)));
+    const tree = l.children.flatMap((id, i) => (keys[i]?.startsWith("end:") ? [] : [makeRow(node(id), keys[i])]));
+    const guide = guideNode();
+    const flat = listGroups().flatMap((g) => g.children.filter((id) => id !== guide?.id).map((id) => makeRow(node(id), null)));
     return [...tree, ...flat];
   };
 
@@ -287,6 +293,17 @@ export function mountSidebar(state) {
     rows,
     row,
     chip,
+    // The guide card's texts, or null while it is closed; tapGuide() taps it.
+    guide: () => (guideNode() ? textsOf(guideNode()) : null),
+    tapGuide() {
+      dispatch(guideNode().id, "tap", {});
+    },
+    // Taps an icon in the top bar by its SF Symbol name.
+    tapBarImage(name) {
+      const img = findDeep(barId(), (n) => n.type === "image" && n.props.systemName === name)[0];
+      if (!img) throw new Error("no bar image " + name);
+      dispatch(img.id, "tap", {});
+    },
     // Whether the top bar shows the bulk-close spinner.
     spinner: () => findDeep(barId(), (n) => n.type === "progress").length > 0,
     // The list's opacity: dimmed while a bulk close runs.
@@ -310,6 +327,14 @@ export function mountSidebar(state) {
     // A Reorderable drop exactly as the host reports it.
     drop(key, index, extra = {}) {
       dispatch(list().id, "move", { id: key, index, side: "above", block: false, ...extra });
+    },
+    // A drag in flight over a slot, as the host reports it; dragEnd() when
+    // it drops or cancels.
+    dragOver(key, index, extra = {}) {
+      dispatch(list().id, "dragChange", { id: key, index, side: "above", block: false, ...extra });
+    },
+    dragEnd() {
+      dispatch(list().id, "dragChange", {});
     },
   };
 }
