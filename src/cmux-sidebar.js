@@ -1,6 +1,7 @@
-// cmux-sidebar: nested workspace groups, working/finished agent dots, a
-// recently-finished clock, title colors and important (red) workspaces,
-// collapse that keeps active work visible, and Active/Favorites filters.
+// cmux-sidebar: nested workspace groups, working/finished agent dots, an
+// optional recently-finished clock, title colors and important (red)
+// workspaces, collapse that keeps active work visible, and Active/Favorites
+// filters.
 //
 // Forked from manaflow-ai/cmux Examples/CustomSidebars/workspaces.js. The
 // whole sidebar is ONE flat drag surface: group headers and workspace rows
@@ -16,6 +17,16 @@
 // Install: https://github.com/s4ff0x/cmux-sidebar#install
 // SPDX-License-Identifier: GPL-3.0-or-later (derived from cmux's
 // Examples/CustomSidebars/workspaces.js, Copyright Manaflow, Inc.)
+
+// --- settings --------------------------------------------------------------------
+// Defaults for the Settings page (the gear in the top bar). The runtime has
+// no storage, so a change made there lasts until the sidebar mounts again
+// (cmux launch, a source edit, a sidebar switch). Change a value here to keep
+// it; an update replaces this file, so set it again after updating.
+const SETTINGS = {
+  // The green clock before a workspace whose agent finished under an hour ago.
+  recentClock: false,
+};
 
 // --- change-only data ------------------------------------------------------------
 // The runtime never dedupes: a binding re-runs and re-sends its prop whenever
@@ -297,9 +308,13 @@ function activity(w) {
   return finishedVersion() && finished.has(w.id) ? "finished" : null;
 }
 const isActive = (w) => activity(w) !== null;
+// Off by default (SETTINGS.recentClock, the Settings page). Off only hides
+// it: the tracker above keeps running, so turning it on shows the clocks of
+// finishes seen while it was off.
+const [recentClockOn, setRecentClockOn] = signal(SETTINGS.recentClock);
 // Finished under an hour ago (or opened since); unlike the green dot,
 // opening keeps it.
-const isRecent = (w) => !!w && !!recentVersion() && recent.has(w.id);
+const isRecent = (w) => recentClockOn() && !!w && !!recentVersion() && recent.has(w.id);
 
 // Closed rows hide at once. cmux refuses a plain workspace.close for a pinned
 // (favorite) workspace or one with a live process, so the sidebar unpins and
@@ -946,28 +961,45 @@ function filterBar() {
           closeSelected,
           Image("xmark").font(8).weight("bold").color("secondary"),
         )),
-    Image("questionmark.circle")
-      .font(12).color(memo(() => (guideOpen() ? "primary" : "tertiary")))
-      .padding(3)
-      .cornerRadius(8)
-      .background(memo(() => (guideOpen() ? "#7f7f7f3d" : null)))
-      .hoverBackground(memo(() => (guideOpen() ? "#7f7f7f3d" : "#7f7f7f24")))
-      .help("Sidebar Guide")
-      .onTap(() => setGuideOpen(!guideOpen())),
+    panelIcon("gearshape", "Sidebar Settings", "settings"),
+    panelIcon("questionmark.circle", "Sidebar Guide", "guide"),
   ])
     .paddingLeading(4)
     .paddingTrailing(4)
     .paddingBottom(2);
 }
 
-// --- guide -------------------------------------------------------------------
+// --- panels ----------------------------------------------------------------------
+// The guide and the settings page take the list's place rather than sitting
+// on top of it: the sidebar scrolls as a whole, so only a short page brings
+// the guide into view from a menu opened far down the list.
+const [panel, setPanel] = signal(null); // "guide" | "settings" | null
+const togglePanel = (name) => setPanel(panel() === name ? null : name);
+
+// A top bar icon that opens its panel, lit while the panel is open.
+function panelIcon(systemName, label, name) {
+  const open = memo(() => panel() === name);
+  return Image(systemName)
+    .font(12).color(memo(() => (open() ? "primary" : "tertiary")))
+    .padding(3)
+    .cornerRadius(8)
+    .background(memo(() => (open() ? "#7f7f7f3d" : null)))
+    .hoverBackground(memo(() => (open() ? "#7f7f7f3d" : "#7f7f7f24")))
+    .help(label)
+    .onTap(() => togglePanel(name));
+}
+
+const panelCard = (children) =>
+  VStack({ spacing: 5 }, children)
+    .padding(10)
+    .cornerRadius(10)
+    .background("#7f7f7f1f")
+    .frame({ maxWidth: "infinity" });
+
+// --- guide -----------------------------------------------------------------------
 // What every icon means and how the mouse works, opened from the top bar's ?
-// or any right-click menu. It takes the list's place rather than sitting on
-// top of it: the sidebar scrolls as a whole, so only a short page brings it
-// into view from a menu opened far down the list.
-const [guideOpen, setGuideOpen] = signal(false);
-const openGuide = () => setGuideOpen(true);
-const guideMenuItems = () => [Divider(), Button("Sidebar Guide", openGuide)];
+// or any right-click menu.
+const guideMenuItems = () => [Divider(), Button("Sidebar Guide", () => setPanel("guide"))];
 
 const guideSection = (title) => Text(title).font(10).weight("semibold").color("tertiary").paddingTop(4);
 // An icon (or a sample), then what it means. The icon's slot is one text
@@ -980,7 +1012,7 @@ const guideLine = (icon, text) =>
 const guideNote = (text) => Text(text).font(11).color("secondary");
 
 function guideCard() {
-  return VStack({ spacing: 5 }, [
+  return panelCard([
     HStack({ spacing: 6 }, [
       Text("Sidebar Guide").font(13).weight("semibold"),
       Spacer(),
@@ -989,7 +1021,7 @@ function guideCard() {
     guideSection("ROWS"),
     guideLine(Circle({ size: 8 }).fill(WORKING_ORANGE), "An agent is working"),
     guideLine(Circle({ size: 8 }).fill(FINISHED_GREEN), "Finished while you were elsewhere; opening clears it"),
-    guideLine(recentClock(), "Finished under an hour ago; opening restarts the hour"),
+    guideLine(recentClock(), "Finished under an hour ago; opening restarts the hour. Off by default: turn it on in Settings (the gear)"),
     guideLine(Image("bookmark.fill").font(10).color(FAVORITE_RED), "Favorite (pinned in cmux), listed first"),
     guideLine(Text("Title").font(11).weight("semibold").color(IMPORTANT_RED), "Important: Title Color → Red; the row keeps its place"),
     guideLine(
@@ -1005,17 +1037,50 @@ function guideCard() {
     guideLine(Circle({ size: 7 }).fill(WORKING_ORANGE), "Active: show only working and finished rows"),
     guideLine(Image("bookmark.fill").font(9).color(FAVORITE_RED), "Favorites: show only favorites"),
     guideLine(Image("xmark").font(8).weight("bold").color("secondary"), "Close N: close the selected rows; a spinner shows until they are gone"),
+    guideLine(Image("gearshape").font(10).color("secondary"), "Settings: turn on the recently finished clock"),
     guideSection("MOUSE"),
     guideNote("Click opens. ⌘-click adds or removes a row from the selection; ⇧-click selects a range."),
     guideNote("Right-click acts on the row, or on the selection. Double-click renames."),
     guideNote("The ✕ on hover closes at once, without asking."),
     guideNote("Drag to reorder: the group the row will land in lights up blue. Drop just below a group's last row to leave it; each step lower leaves one more level."),
+  ]).onTap(() => setPanel(null));
+}
+
+// --- settings page ---------------------------------------------------------------
+// Opened from the top bar's gear. Values start from SETTINGS at the top of
+// this file and last until the sidebar mounts again.
+function settingToggle(label, isOn, toggle, icon) {
+  return HStack({ spacing: 6 }, [
+    Image(memo(() => (isOn() ? "checkmark.square.fill" : "square")))
+      .font(12).color(memo(() => (isOn() ? "accent" : "secondary"))),
+    icon,
+    Text(label).font(11).weight("medium"),
+    Spacer(),
   ])
-    .padding(10)
-    .cornerRadius(10)
-    .background("#7f7f7f1f")
+    .padding(4)
+    .cornerRadius(6)
+    .hoverBackground("#7f7f7f24")
     .frame({ maxWidth: "infinity" })
-    .onTap(() => setGuideOpen(false));
+    .onTap(toggle);
+}
+
+function settingsCard() {
+  return panelCard([
+    HStack({ spacing: 6 }, [
+      Text("Sidebar Settings").font(13).weight("semibold"),
+      Spacer(),
+      Image("xmark").font(9).weight("bold").color("tertiary")
+        .padding(3)
+        .cornerRadius(6)
+        .hoverBackground("#7f7f7f24")
+        .help("Close")
+        .onTap(() => setPanel(null)),
+    ]),
+    settingToggle("Recently finished clock", recentClockOn, () => setRecentClockOn(!recentClockOn()), recentClock()),
+    guideNote("A green clock before a workspace whose agent finished under an hour ago. Off by default."),
+    Text("Settings reset when the sidebar reloads (cmux launch, a source edit, a sidebar switch). To keep one, set it in SETTINGS at the top of cmux-sidebar.js.")
+      .font(10).color("tertiary").paddingTop(4),
+  ]);
 }
 
 // --- drop resolution ---------------------------------------------------------
@@ -1576,11 +1641,12 @@ function entryRow(e, key) {
 sidebar(() =>
   VStack({ spacing: 4 }, [
     filterBar(),
-    ForEach({ items: memo(() => (guideOpen() ? ["guide"] : [])), key: (k) => k }, guideCard),
+    ForEach({ items: memo(() => (panel() ? [panel()] : [])), key: (k) => k }, (_, k) =>
+      (k === "guide" ? guideCard() : settingsCard())),
     Reorderable(
       {
-        // Empty while the guide is open: it takes the list's place.
-        items: memo(() => (guideOpen() ? [] : flatEntries())),
+        // Empty while a panel is open: it takes the list's place.
+        items: memo(() => (panel() ? [] : flatEntries())),
         key: (e) => e.id,
         spacing: 2,
         onMove: handleMove,
@@ -1591,7 +1657,7 @@ sidebar(() =>
     // The empty-filter message.
     VStack({ spacing: 2 }, [
       ForEach(
-        { items: memo(() => (emptyMessage() && !guideOpen() ? [emptyMessage()] : [])), key: (m) => m },
+        { items: memo(() => (emptyMessage() && !panel() ? [emptyMessage()] : [])), key: (m) => m },
         (m) => Text(memo(() => m())).font(12).color("tertiary").paddingHorizontal(10).paddingVertical(6),
       ),
     ]),

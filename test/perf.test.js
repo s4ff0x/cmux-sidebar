@@ -60,8 +60,9 @@ describe("scene op budget", () => {
 
   test("clock ticks cost nothing while a clock icon is shown", () => {
     const at = (now, status) => ({ ...big({ "T0#2": { agents: [agent(status, { id: "s-T0#2" })] } }), now });
-    const sb = mountSidebar(at(0, "working"));
+    const sb = mountSidebar(at(0, "working"), { recentClock: true });
     sb.setData(at(0, "idle"));
+    assert.equal(sb.row("T0 item 2").recent(), true);
     for (const now of [1, 59, 60, 3599]) {
       assert.equal(sb.opsDuring(() => sb.setData(at(now, "idle"))).length, 0, `at ${now}s`);
     }

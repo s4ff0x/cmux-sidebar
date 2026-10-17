@@ -19,16 +19,23 @@ badge, multi-select (⌘-click / ⇧-click), Close Others, and drag-and-drop.
   with a running subagent. Waiting for input, idle, and ended are not working. Green marks a
   workspace whose turn **finished while you were elsewhere**; it stays green until you open that
   workspace. A group header shows its own anchor workspace's dot; headers show no counts.
-- **Recently finished clock.** A green clock icon before the title marks a workspace whose agent
-  finished a turn less than an hour ago, whether you were there or elsewhere. It hides an hour
-  after the latest finish, and opening the workspace (in the sidebar or anywhere in cmux)
-  restarts that hour. Marking it important or a new turn never clear it. During a new turn the
-  clock stays beside the orange dot, and that turn's finish starts a new hour. A group header
-  shows its anchor workspace's clock. It survives a sidebar mount in most cases (see the limits
-  below).
+- **Recently finished clock (optional, off by default).** Turn it on in **Settings** (below).
+  A green clock icon before the title marks a workspace whose agent finished a turn less than an
+  hour ago, whether you were there or elsewhere. It hides an hour after the latest finish, and
+  opening the workspace (in the sidebar or anywhere in cmux) restarts that hour. Marking it
+  important or a new turn never clear it. During a new turn the clock stays beside the orange
+  dot, and that turn's finish starts a new hour. A group header shows its anchor workspace's
+  clock. It survives a sidebar mount in most cases (see the limits below). The sidebar tracks
+  finishes while the clock is off, so turning it on shows the clocks of the last hour at once.
+- **Settings.** The gear at the right of the top bar opens the settings page in place of the
+  list; it holds the recently finished clock toggle. The cmux sidebar runtime has no storage, so
+  a change made there lasts until the sidebar mounts again (cmux launch, a source edit, a sidebar
+  switch). To keep a setting, change its default in the `SETTINGS` block at the top of
+  `~/.config/cmux/sidebars/cmux-sidebar.js`. An update replaces that file, so set it again after
+  updating.
 - **Sidebar Guide.** The `?` at the right of the top bar, or **Sidebar Guide** at the end of any
-  right-click menu, shows a short guide to every icon, the top bar and the mouse, in place of the
-  list. Click the guide (or the `?`) to close it.
+  right-click menu, shows a short guide to every icon, the top bar, the settings and the mouse, in
+  place of the list. Click the guide (or the `?`) to close it.
 - **Filters.** Two toggle chips sit at the top of the sidebar:
   - **Active · N** shows only workspaces with an orange or green dot.
   - **Favorites · N** shows only favorite workspaces.

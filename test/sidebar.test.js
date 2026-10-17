@@ -77,6 +77,22 @@ describe("activity indicator", () => {
 describe("recently finished clock", () => {
   const HOUR = 3600;
   const one = (now, agents, extra = {}) => ({ now, workspaces: workspaces({ id: "w1", title: "job", agents, ...extra }) });
+  const CLOCK = { recentClock: true };
+
+  test("the clock is off by default; Settings turns it on, for finishes seen while it was off too, and off again", () => {
+    const sb = mountSidebar(one(0, [agent("working")]));
+    sb.setData(one(10, [agent("idle")]));
+    assert.equal(sb.row("job").recent(), false);
+    const flip = () => {
+      sb.tapBarImage("gearshape");
+      sb.tapSetting("Recently finished clock");
+      sb.tapBarImage("gearshape");
+    };
+    flip();
+    assert.equal(sb.row("job").recent(), true);
+    flip();
+    assert.equal(sb.row("job").recent(), false);
+  });
 
   test("opening the workspace, in the sidebar or in cmux, restarts its clock's hour", () => {
     const two = (now, open, status = "idle") => ({
@@ -86,7 +102,7 @@ describe("recently finished clock", () => {
         { id: "w2", title: "other", selected: open === "w2" },
       ),
     });
-    const sb = mountSidebar(two(0, "w2", "working"));
+    const sb = mountSidebar(two(0, "w2", "working"), CLOCK);
     assert.equal(sb.row("job").recent(), false);
     sb.setData(two(0, "w2"));
     assert.deepEqual([sb.row("job").indicator(), sb.row("job").recent()], ["finished", true]);
@@ -104,7 +120,7 @@ describe("recently finished clock", () => {
 
   test("a new turn keeps the clock beside its orange dot, and its finish starts a new hour", () => {
     const open = (now, status) => one(now, [agent(status)], { selected: true });
-    const sb = mountSidebar(open(0, "working"));
+    const sb = mountSidebar(open(0, "working"), CLOCK);
     sb.setData(open(60, "idle"));
     assert.equal(sb.row("job").recent(), true); // finished while open
     sb.setData(open(1800, "working"));
@@ -119,7 +135,7 @@ describe("recently finished clock", () => {
   });
 
   test("a turn running past the hour still drops the clock of the previous finish", () => {
-    const sb = mountSidebar(one(0, [agent("working")]));
+    const sb = mountSidebar(one(0, [agent("working")]), CLOCK);
     sb.setData(one(100, [agent("idle")]));
     sb.setData(one(200, [agent("working")]));
     sb.setData(one(100 + HOUR, [agent("working")]));
@@ -127,7 +143,7 @@ describe("recently finished clock", () => {
   });
 
   test("marking a workspace important keeps its clock", () => {
-    const sb = mountSidebar(one(0, [agent("working")]));
+    const sb = mountSidebar(one(0, [agent("working")]), CLOCK);
     sb.setData(one(10, [agent("idle")]));
     sb.row("job").menu("Mark as Important");
     sb.setData(one(20, [agent("idle")], { color: "#FF453A" }));
@@ -136,7 +152,7 @@ describe("recently finished clock", () => {
 
   test("the hour is wall time: a stale host clock neither shortens nor stretches it", () => {
     const at = (now, status) => ({ ...one(now, [agent(status)]), clock: 0 });
-    const sb = mountSidebar(at(0, "working"));
+    const sb = mountSidebar(at(0, "working"), CLOCK);
     sb.setData(at(3000, "idle"));
     sb.setData({ ...one(3000 + HOUR - 60, [agent("idle")]) }); // the clock catches up
     assert.equal(sb.row("job").recent(), true);
@@ -145,7 +161,7 @@ describe("recently finished clock", () => {
   });
 
   test("a workspace missing from one data push keeps its clock", () => {
-    const sb = mountSidebar(one(0, [agent("working")]));
+    const sb = mountSidebar(one(0, [agent("working")]), CLOCK);
     sb.setData(one(10, [agent("idle")]));
     sb.setData({ now: 20, workspaces: [] });
     sb.setData(one(30, [agent("idle")]));
@@ -158,14 +174,14 @@ describe("recently finished clock", () => {
       workspaces: workspaces({ id: "g1", title: "lead", group: "G", agents: [agent(status, { id: "s1" })] }, { id: "m", title: "member", group: "G" }),
       groups: [group("G", "Work", "g1")],
     });
-    const sb = mountSidebar(state("working"));
+    const sb = mountSidebar(state("working"), CLOCK);
     sb.setData(state("idle"));
     assert.deepEqual([sb.row("Work").recent(), sb.row("member").recent()], [true, false]);
   });
 
   test("after a mount, the clock read from the data lasts through a new turn until an hour after the answer", () => {
     const answered = (now, extra = {}) => one(now, [agent("idle", { lastActivityAt: 1600 })], { latestAt: 1000, ...extra });
-    const sb = mountSidebar(answered(2000, { color: "#FF453A" }));
+    const sb = mountSidebar(answered(2000, { color: "#FF453A" }), CLOCK);
     assert.deepEqual([sb.row("job").indicator(), sb.row("job").recent(), sb.row("job").important()], [null, true, true]);
     // A new prompt: the data no longer shows the old answer.
     const busy = (now) => one(now, [agent("working", { lastActivityAt: now })], { latestAt: 3000 });
@@ -187,7 +203,7 @@ describe("recently finished clock", () => {
         { id: "w3", title: "old prompt", latestAt: 100, agents: [agent("idle", { lastActivityAt: 4900 })] },
         { id: "w4", title: "quit", latestAt: 4000, agents: [agent("ended", { lastActivityAt: 4600 })] },
       ),
-    });
+    }, CLOCK);
     assert.deepEqual(["unanswered", "no prompt", "old prompt", "quit"].map((t) => sb.row(t).recent()), [false, false, false, false]);
   });
 });
@@ -968,7 +984,7 @@ describe("sidebar guide", () => {
     const outline = sb.outline();
     assert.equal(sb.guide(), null);
     sb.tapBarImage("questionmark.circle");
-    assert.ok(sb.guide().includes("Finished under an hour ago; opening restarts the hour"));
+    assert.notEqual(sb.guide(), null);
     assert.deepEqual(sb.outline(), []);
     sb.tapGuide();
     assert.deepEqual([sb.guide(), sb.outline()], [null, outline]);
@@ -977,6 +993,18 @@ describe("sidebar guide", () => {
     sb.tapBarImage("questionmark.circle"); // the ? closes it too
     sb.row("B").menu("Sidebar Guide");
     assert.notEqual(sb.guide(), null);
+  });
+
+  test("the gear opens Settings in the list's place; the ? swaps in the guide; the ✕ closes Settings", () => {
+    const sb = mountSidebar(tree3());
+    const outline = sb.outline();
+    sb.tapBarImage("gearshape");
+    assert.deepEqual([sb.settings() !== null, sb.outline()], [true, []]);
+    sb.tapBarImage("questionmark.circle");
+    assert.deepEqual([sb.settings(), sb.guide() !== null], [null, true]);
+    sb.tapBarImage("gearshape");
+    sb.closeSettings();
+    assert.deepEqual([sb.settings(), sb.guide(), sb.outline()], [null, null, outline]);
   });
 });
 

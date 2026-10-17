@@ -47,7 +47,9 @@ export const agent = (status, extra = {}) => ({
 
 // --- host ----------------------------------------------------------------------
 
-export function mountSidebar(state) {
+// `recentClock: true` turns the clock on through the Settings page, as a
+// user would; it is off by default.
+export function mountSidebar(state, { recentClock = false } = {}) {
   const nodes = new Map();
   const actions = [];
   let rootId = null;
@@ -236,16 +238,22 @@ export function mountSidebar(state) {
     walk(rootId);
     return out;
   };
-  // The open guide card, which sits outside the list; null while closed.
-  const guideNode = () =>
-    listGroups().flatMap((g) => g.children).map(node).find((n) => textsOf(n)[0] === "Sidebar Guide") ?? null;
-  // Group end slots (empty drop slots) and the guide are not rows.
+  // The open panel card (the guide or the settings page), which sits outside
+  // the list; null while none is open.
+  const PANEL_TITLES = new Set(["Sidebar Guide", "Sidebar Settings"]);
+  const panelNode = () =>
+    listGroups().flatMap((g) => g.children).map(node).find((n) => PANEL_TITLES.has(textsOf(n)[0])) ?? null;
+  const openPanel = (title) => {
+    const n = panelNode();
+    return n && textsOf(n)[0] === title ? n : null;
+  };
+  // Group end slots (empty drop slots) and an open panel are not rows.
   const rows = () => {
     const l = list();
     const keys = JSON.parse(l.props.itemKeys ?? "[]");
     const tree = l.children.flatMap((id, i) => (keys[i]?.startsWith("end:") ? [] : [makeRow(node(id), keys[i])]));
-    const guide = guideNode();
-    const flat = listGroups().flatMap((g) => g.children.filter((id) => id !== guide?.id).map((id) => makeRow(node(id), null)));
+    const panel = panelNode();
+    const flat = listGroups().flatMap((g) => g.children.filter((id) => id !== panel?.id).map((id) => makeRow(node(id), null)));
     return [...tree, ...flat];
   };
 
@@ -288,22 +296,48 @@ export function mountSidebar(state) {
     return r;
   };
 
+  // Taps an icon in the top bar by its SF Symbol name.
+  const tapBarImage = (name) => {
+    const img = findDeep(barId(), (n) => n.type === "image" && n.props.systemName === name)[0];
+    if (!img) throw new Error("no bar image " + name);
+    dispatch(img.id, "tap", {});
+  };
+  // Taps the settings page's toggle whose label starts with `label`.
+  const tapSetting = (label) => {
+    const page = openPanel("Sidebar Settings");
+    if (!page) throw new Error("settings page is closed");
+    const toggle = findDeep(page.id, (n) => n.props.tappable === true && textsOf(n).join(" ").startsWith(label))[0];
+    if (!toggle) throw new Error(`no setting "${label}"`);
+    dispatch(toggle.id, "tap", {});
+  };
+
+  if (recentClock) {
+    tapBarImage("gearshape");
+    tapSetting("Recently finished clock");
+    tapBarImage("gearshape");
+  }
+
   return {
     setData,
     rows,
     row,
     chip,
     // The guide card's texts, or null while it is closed; tapGuide() taps it.
-    guide: () => (guideNode() ? textsOf(guideNode()) : null),
+    guide: () => (openPanel("Sidebar Guide") ? textsOf(openPanel("Sidebar Guide")) : null),
     tapGuide() {
-      dispatch(guideNode().id, "tap", {});
+      dispatch(openPanel("Sidebar Guide").id, "tap", {});
     },
-    // Taps an icon in the top bar by its SF Symbol name.
-    tapBarImage(name) {
-      const img = findDeep(barId(), (n) => n.type === "image" && n.props.systemName === name)[0];
-      if (!img) throw new Error("no bar image " + name);
-      dispatch(img.id, "tap", {});
+    // The settings page's texts, or null while it is closed.
+    settings: () => (openPanel("Sidebar Settings") ? textsOf(openPanel("Sidebar Settings")) : null),
+    tapSetting,
+    // Taps the settings page's ✕.
+    closeSettings() {
+      const page = openPanel("Sidebar Settings");
+      const close = page && findDeep(page.id, (n) => n.type === "image" && n.props.systemName === "xmark")[0];
+      if (!close) throw new Error("settings page has no ✕");
+      dispatch(close.id, "tap", {});
     },
+    tapBarImage,
     // Whether the top bar shows the bulk-close spinner.
     spinner: () => findDeep(barId(), (n) => n.type === "progress").length > 0,
     // The list's opacity: dimmed while a bulk close runs.
