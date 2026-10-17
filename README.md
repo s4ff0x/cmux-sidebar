@@ -19,6 +19,12 @@ badge, multi-select (⌘-click / ⇧-click), Close Others, and drag-and-drop.
   with a running subagent. Waiting for input, idle, and ended are not working. Green marks a
   workspace whose turn **finished while you were elsewhere**; it stays green until you open that
   workspace. A group header shows its own anchor workspace's dot; headers show no counts.
+- **Recently finished clock.** A green clock icon before the title marks a workspace whose agent
+  finished a turn less than an hour ago, whether you were there or elsewhere. Only time clears
+  it, an hour after the latest finish: opening the workspace, marking it important, or a new turn
+  never do. During a new turn the clock stays beside the orange dot, and that turn's finish
+  starts a new hour. A group header shows its anchor workspace's clock. It survives a sidebar
+  mount in most cases (see the limits below).
 - **Filters.** Two toggle chips sit at the top of the sidebar:
   - **Active · N** shows only workspaces with an orange or green dot.
   - **Favorites · N** shows only favorite workspaces.
@@ -34,13 +40,31 @@ badge, multi-select (⌘-click / ⇧-click), Close Others, and drag-and-drop.
 - **Favorites.** Right-click a workspace → **Favorite** / **Unfavorite**. A favorite shows a red
   bookmark before its title. A favorite is the native cmux pin, so it persists, the built-in
   sidebar shows it as pinned, and cmux keeps it at the top of the tab order.
+- **Title color.** Right-click a workspace → **Title Color** draws its title in Red, Orange,
+  Yellow, Green, Teal, Blue, Purple, or Pink; **None** clears it. With a multi-selection, every
+  selected row takes the color. The title color is the native cmux workspace color, so it
+  persists, and the built-in sidebar shows it as the workspace's border. A color set outside this
+  sidebar (the built-in sidebar, `cmux workspace-action set-color`) colors the title too.
+- **Important.** Right-click a workspace → **Mark as Important** / **Unmark Important**: a
+  shortcut for **Title Color → Red** / **None**. An important workspace keeps its place (it is a
+  color, not a pin). cmux's own named Red (`#C0392B`) counts as important too and is drawn in the
+  same red.
 - **Collapse keeps active work visible.** A collapsed group hides everything except working and
   finished-unopened workspaces, listed under its header with a dim breadcrumb (`Backend › API ›`)
   when they come from a subgroup.
-- **Workspace color.** Right-click a workspace → **Border Color** sets the native cmux workspace
-  color, which the built-in sidebar shows. This sidebar does not draw it.
 - **Create inside a group.** Use the hover `+` on a group header, or right-click →
   **New Workspace in Group**. Right-click a workspace → **Move to Group** lists the full tree.
+- **Multi-select.** ⇧-click selects a range of rows: from the open workspace, or from your last
+  click while a selection is already open. ⌘-click adds or removes one row. While 2 or more rows
+  are selected, a **✕ Close N** chip shows at the right of the top bar and closes them all in one
+  click; right-click a selected row → **Close N Workspaces** does the same. ⌘W cannot: cmux sends
+  custom sidebars no key events, and ⌘W is cmux's own **Close Tab**, which closes the focused
+  terminal tab.
+- **Closing never asks.** cmux refuses a plain close for a favorite (pinned) workspace or one
+  with a running process, so a close from this sidebar (✕, menu, or chip) unpins the favorite
+  and forces the close. That ends whatever runs in the workspace, an agent included, without a
+  prompt. If cmux still lists the workspace 5 seconds later, its row shows again, so a close that
+  failed never looks like one that worked.
 
 ## Install
 
@@ -91,13 +115,24 @@ and Antigravity; see cmux's
 [agent hook docs](https://github.com/manaflow-ai/cmux/blob/main/docs/agent-hooks.md). Reports
 for other agents are welcome.
 
-### Limits of the green dot
+### Limits of the green dot and clock
 
-cmux records no "last opened" time, so the sidebar watches each workspace go from working to
-finished itself and keeps that in memory. Green dots therefore start empty whenever the sidebar
-mounts: on cmux launch, on `cmux sidebar reload`, when the source file changes, or when you
-switch to another sidebar and back. A turn that finished before then shows no dot. Toggling a
-filter chip remounts rows but not the sidebar, so green dots survive it.
+cmux records no "last opened" or "turn finished" time, so the sidebar watches each workspace go
+from working to finished itself and keeps that in memory. That memory starts empty whenever the
+sidebar mounts: on cmux launch, when the source file changes, or when you switch to another
+sidebar and back (`cmux sidebar reload` with an unchanged file does not remount).
+
+- **Green dots** start empty then: a turn that finished before the mount shows no dot.
+- **Clocks** are read back from cmux data then: a workspace gets its clock if its last prompt
+  was less than an hour ago and an agent that is now idle or waiting for input was active after
+  that prompt (so the prompt got its answer). The hour then runs from that answer, through any
+  later turns. The data can't tell in three cases, so they show no clock after a mount: the
+  prompt was more than an hour ago (a long turn, or turns that ran on without a new prompt), an
+  agent is mid-turn at the mount, or the agent was quit since.
+
+Toggling a filter chip remounts rows but not the sidebar, so both survive it. The hour is
+measured on the wall clock and checked once a minute, so a clock icon can stay up to a minute past
+its hour.
 
 ## Nesting convention
 
@@ -156,13 +191,15 @@ key arrives as a freshly parsed object about once a second. To keep ticks cheap,
 reads data only through change-only memos (`memo`, `memoJSON`) and gives each workspace its own
 signal, so a tick costs ops only for what actually changed. `test/perf.test.js` holds this
 budget on a 60-workspace, 3-level fixture: an identical tick sends 0 scene ops (it used to send
-about 1144), and one agent starting work touches only its own row and the `Active` count.
+about 1144), a clock tick sends 0 while a clock icon is shown, and one agent starting work touches
+only its own row and the `Active` count.
 
 Scrolling has a different cost. The host renders the list in a non-lazy SwiftUI `ScrollView`,
 and every scroll frame re-processes each rendered scene node (every node carries its own hover
 tracking), so scroll cost grows with nodes per row, not with data. Rows therefore mount only what
-they show: the activity dot, favorite bookmark, breadcrumb, and unread badge mount on demand
-(a row without a dot keeps the slot as padding), and the dot is one circle. A plain row is 7 nodes
+they show: the activity dot, recently finished clock, favorite bookmark, breadcrumb, and unread
+badge mount on demand (a row without a dot keeps the slot as padding; a header's dot and clock
+mount the same way), and the dot is one circle. A plain row is 7 nodes
 (it was 13), a header 7 (was 9), with the same pixels. On a 102-workspace sidebar this cut the
 cmux main thread from about 85% to about 52% busy while scrolling, and SwiftUI's render share
 from about 55% to about 29%. The same `test/perf.test.js` holds the per-row node budget.

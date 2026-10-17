@@ -74,6 +74,112 @@ describe("activity indicator", () => {
   });
 });
 
+describe("recently finished clock", () => {
+  const HOUR = 3600;
+  const one = (now, agents, extra = {}) => ({ now, workspaces: workspaces({ id: "w1", title: "job", agents, ...extra }) });
+
+  test("a finished turn keeps its clock after the workspace is opened, until an hour has passed", () => {
+    const sb = mountSidebar(one(1000, [agent("working")]));
+    assert.equal(sb.row("job").recent(), false);
+    sb.setData(one(1000, [agent("idle")]));
+    assert.deepEqual([sb.row("job").indicator(), sb.row("job").recent()], ["finished", true]);
+    sb.row("job").tap();
+    sb.setData(one(1000 + HOUR - 60, [agent("idle")], { selected: true }));
+    assert.deepEqual([sb.row("job").indicator(), sb.row("job").recent()], [null, true]);
+    sb.setData(one(1000 + HOUR, [agent("idle")], { selected: true }));
+    assert.equal(sb.row("job").recent(), false);
+  });
+
+  test("a new turn keeps the clock beside its orange dot, and its finish starts a new hour", () => {
+    const open = (now, status) => one(now, [agent(status)], { selected: true });
+    const sb = mountSidebar(open(0, "working"));
+    sb.setData(open(60, "idle"));
+    assert.equal(sb.row("job").recent(), true); // finished while open
+    sb.setData(open(1800, "working"));
+    assert.deepEqual([sb.row("job").indicator(), sb.row("job").recent()], ["working", true]);
+    sb.setData(open(2400, "idle"));
+    sb.setData(open(60 + HOUR, "idle"));
+    assert.equal(sb.row("job").recent(), true);
+    sb.setData(open(2400 + HOUR - 1, "idle"));
+    assert.equal(sb.row("job").recent(), true);
+    sb.setData(open(2400 + HOUR, "idle"));
+    assert.equal(sb.row("job").recent(), false);
+  });
+
+  test("a turn running past the hour still drops the clock of the previous finish", () => {
+    const sb = mountSidebar(one(0, [agent("working")]));
+    sb.setData(one(100, [agent("idle")]));
+    sb.setData(one(200, [agent("working")]));
+    sb.setData(one(100 + HOUR, [agent("working")]));
+    assert.deepEqual([sb.row("job").indicator(), sb.row("job").recent()], ["working", false]);
+  });
+
+  test("marking a workspace important keeps its clock", () => {
+    const sb = mountSidebar(one(0, [agent("working")]));
+    sb.setData(one(10, [agent("idle")]));
+    sb.row("job").menu("Mark as Important");
+    sb.setData(one(20, [agent("idle")], { color: "#FF453A" }));
+    assert.deepEqual([sb.row("job").important(), sb.row("job").recent()], [true, true]);
+  });
+
+  test("the hour is wall time: a stale host clock neither shortens nor stretches it", () => {
+    const at = (now, status) => ({ ...one(now, [agent(status)]), clock: 0 });
+    const sb = mountSidebar(at(0, "working"));
+    sb.setData(at(3000, "idle"));
+    sb.setData({ ...one(3000 + HOUR - 60, [agent("idle")]) }); // the clock catches up
+    assert.equal(sb.row("job").recent(), true);
+    sb.setData({ ...one(3000 + HOUR, [agent("idle")]) });
+    assert.equal(sb.row("job").recent(), false);
+  });
+
+  test("a workspace missing from one data push keeps its clock", () => {
+    const sb = mountSidebar(one(0, [agent("working")]));
+    sb.setData(one(10, [agent("idle")]));
+    sb.setData({ now: 20, workspaces: [] });
+    sb.setData(one(30, [agent("idle")]));
+    assert.equal(sb.row("job").recent(), true);
+  });
+
+  test("a group header shows its anchor's clock", () => {
+    const state = (status) => ({
+      now: 0,
+      workspaces: workspaces({ id: "g1", title: "lead", group: "G", agents: [agent(status, { id: "s1" })] }, { id: "m", title: "member", group: "G" }),
+      groups: [group("G", "Work", "g1")],
+    });
+    const sb = mountSidebar(state("working"));
+    sb.setData(state("idle"));
+    assert.deepEqual([sb.row("Work").recent(), sb.row("member").recent()], [true, false]);
+  });
+
+  test("after a mount, the clock read from the data lasts through a new turn until an hour after the answer", () => {
+    const answered = (now, extra = {}) => one(now, [agent("idle", { lastActivityAt: 1600 })], { latestAt: 1000, ...extra });
+    const sb = mountSidebar(answered(2000, { color: "#FF453A" }));
+    assert.deepEqual([sb.row("job").indicator(), sb.row("job").recent(), sb.row("job").important()], [null, true, true]);
+    // A new prompt: the data no longer shows the old answer.
+    const busy = (now) => one(now, [agent("working", { lastActivityAt: now })], { latestAt: 3000 });
+    sb.setData(busy(3000));
+    assert.deepEqual([sb.row("job").indicator(), sb.row("job").recent()], ["working", true]);
+    sb.setData(busy(1600 + HOUR - 1));
+    assert.equal(sb.row("job").recent(), true);
+    sb.setData(busy(1600 + HOUR));
+    assert.equal(sb.row("job").recent(), false);
+  });
+
+  test("after a mount, no clock for an unanswered prompt, a session with no prompt, an older prompt, or an ended agent", () => {
+    const sb = mountSidebar({
+      now: 5000,
+      workspaces: workspaces(
+        { id: "w1", title: "unanswered", latestAt: 4000, agents: [agent("idle", { lastActivityAt: 4000 })] },
+        { id: "w2", title: "no prompt", agents: [agent("idle", { lastActivityAt: 4600 })] },
+        // A restored session starts (bumping its activity) long after its prompt.
+        { id: "w3", title: "old prompt", latestAt: 100, agents: [agent("idle", { lastActivityAt: 4900 })] },
+        { id: "w4", title: "quit", latestAt: 4000, agents: [agent("ended", { lastActivityAt: 4600 })] },
+      ),
+    });
+    assert.deepEqual(["unanswered", "no prompt", "old prompt", "quit"].map((t) => sb.row(t).recent()), [false, false, false, false]);
+  });
+});
+
 // A 3-level tree: A, A/B, A/B/C, each with an anchor (the header) and one
 // member, plus an ungrouped workspace at the end.
 function tree3(over = {}) {
@@ -358,18 +464,36 @@ describe("workspaces inside groups", () => {
   });
 });
 
-describe("border color", () => {
-  const two = () =>
-    workspaces({ id: "w1", title: "red", color: "#FF453A" }, { id: "w2", title: "plain" });
+describe("title color", () => {
+  const two = (over = {}) =>
+    workspaces({ id: "w1", title: "red", color: "#FF453A", ...over.w1 }, { id: "w2", title: "plain", ...over.w2 });
 
-  test("Border Color still sets and clears the native color", () => {
+  test("Title Color sets the native color and draws the title in it at once; None clears it", () => {
     const sb = mountSidebar({ workspaces: two() });
-    sb.row("plain").menu("Border Color", "Blue");
-    sb.row("red").menu("Border Color", "None");
+    sb.row("plain").menu("Title Color", "Blue");
+    sb.row("red").menu("Title Color", "None");
     assert.deepEqual(sb.take(), [
       { method: "workspace.action", params: { action: "set_color", workspace_id: "w2", color: "#0A84FF" } },
       { method: "workspace.action", params: { action: "clear_color", workspace_id: "w1" } },
     ]);
+    // Before cmux echoes it, and after.
+    assert.deepEqual([sb.row("plain").textColor("plain"), sb.row("red").textColor("red")], ["#0A84FF", "secondary"]);
+    sb.setData({ workspaces: two({ w1: { color: undefined }, w2: { color: "#0A84FF" } }) });
+    assert.deepEqual([sb.row("plain").textColor("plain"), sb.row("red").textColor("red")], ["#0A84FF", "secondary"]);
+  });
+
+  test("a color set outside the sidebar colors the title too", () => {
+    const sb = mountSidebar({ workspaces: two() });
+    sb.setData({ workspaces: two({ w2: { color: "#1565C0" } }) });
+    assert.equal(sb.row("plain").textColor("plain"), "#1565C0");
+  });
+
+  test("a multi-selection takes the color together", () => {
+    const sb = mountSidebar({ workspaces: two() });
+    sb.row("red").tap({ cmd: true });
+    sb.row("plain").tap({ cmd: true });
+    sb.row("plain").menu("Title Color", "Green");
+    assert.deepEqual(sb.take().map((a) => [a.params.workspace_id, a.params.color]).sort(), [["w1", "#30D158"], ["w2", "#30D158"]]);
   });
 });
 
@@ -627,6 +751,94 @@ describe("favorites", () => {
     const sb = mountSidebar({ workspaces: workspaces({ id: "w1", title: "job" }) });
     sb.setData({ workspaces: workspaces({ id: "w1", title: "job", pinned: true }) });
     assert.equal(sb.row("job").favorite(), true);
+  });
+});
+
+describe("important", () => {
+  test("Mark as Important sets the native red color; Unmark Important clears it", () => {
+    const sb = mountSidebar({
+      workspaces: workspaces({ id: "w1", title: "hot", color: "#FF453A" }, { id: "w2", title: "plain" }),
+    });
+    sb.row("plain").menu("Mark as Important");
+    sb.row("hot").menu("Unmark Important");
+    assert.deepEqual(sb.take(), [
+      { method: "workspace.action", params: { action: "set_color", workspace_id: "w2", color: "#FF453A" } },
+      { method: "workspace.action", params: { action: "clear_color", workspace_id: "w1" } },
+    ]);
+  });
+
+  test("either red makes the title red, and an important workspace keeps its place", () => {
+    const titles = ["first", "cmux red", "sidebar red", "blue"];
+    const sb = mountSidebar({
+      workspaces: workspaces(
+        { id: "w1", title: "first" },
+        { id: "w2", title: "cmux red", color: "#c0392b" },
+        { id: "w3", title: "sidebar red", color: "#FF453A" },
+        { id: "w4", title: "blue", color: "#1565C0" },
+      ),
+    });
+    assert.deepEqual(sb.outline(), titles);
+    assert.deepEqual(titles.map((t) => sb.row(t).important()), [false, true, true, false]);
+  });
+});
+
+describe("closing", () => {
+  test("a close unpins a favorite and forces past a running process, without asking", () => {
+    const sb = mountSidebar({ workspaces: workspaces({ id: "w1", title: "fav", pinned: true }, { id: "w2", title: "plain" }) });
+    sb.row("fav").tapImage("xmark");
+    sb.row("plain").tapImage("xmark");
+    assert.deepEqual(sb.take(), [
+      { method: "workspace.action", params: { action: "unpin", workspace_id: "w1" } },
+      { method: "workspace.close", params: { workspace_id: "w1", force: "true" } },
+      { method: "workspace.close", params: { workspace_id: "w2", force: "true" } },
+    ]);
+    assert.deepEqual(sb.outline(), []);
+  });
+
+  test("a workspace cmux keeps after its close shows again 5 seconds later", () => {
+    const state = (now) => ({ now, workspaces: workspaces({ id: "w1", title: "kept" }, { id: "w2", title: "other" }) });
+    const sb = mountSidebar(state(100));
+    sb.row("kept").tapImage("xmark");
+    sb.setData(state(104));
+    assert.deepEqual(sb.outline(), ["other"]);
+    sb.setData(state(105));
+    assert.deepEqual(sb.outline(), ["kept", "other"]);
+  });
+});
+
+describe("multi-select", () => {
+  const titles = ["one", "two", "three", "four"];
+  const open = (id) => ({
+    workspaces: workspaces(...titles.map((title, i) => ({ id: "w" + (i + 1), title, selected: id === "w" + (i + 1) }))),
+  });
+  const closes = (actions) => actions.filter((a) => a.method === "workspace.close").map((a) => a.params.workspace_id);
+
+  test("Shift-click selects a range from the open workspace, even before any click in the sidebar", () => {
+    const sb = mountSidebar(open("w2"));
+    sb.row("four").tap({ shift: true });
+    sb.row("three").menu("Close 3 Workspaces");
+    assert.deepEqual(closes(sb.take()), ["w2", "w3", "w4"]);
+  });
+
+  test("Shift-click after a plain click selects from the clicked row, and the menu closes them all", () => {
+    const sb = mountSidebar(open("w4"));
+    sb.row("one").tap();
+    sb.row("three").tap({ shift: true });
+    assert.deepEqual(sb.row("two").menuLabels().filter((l) => l.startsWith("Close ")), ["Close Others", "Close 3 Workspaces"]);
+    sb.row("two").menu("Close 3 Workspaces");
+    assert.deepEqual(closes(sb.take()), ["w1", "w2", "w3"]);
+  });
+
+  test("a Close N chip shows while 2+ rows are selected and closes them in one click", () => {
+    const sb = mountSidebar(open("w1"));
+    sb.row("two").tap({ cmd: true });
+    assert.throws(() => sb.chip("Close"), /no chip/);
+    sb.row("four").tap({ cmd: true });
+    assert.equal(sb.chip("Close").text, "Close 2");
+    sb.chip("Close").tap();
+    assert.deepEqual(closes(sb.take()), ["w2", "w4"]);
+    assert.deepEqual(sb.outline(), ["one", "three"]);
+    assert.throws(() => sb.chip("Close"), /no chip/);
   });
 });
 

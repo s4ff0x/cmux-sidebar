@@ -1,5 +1,6 @@
-// cmux-sidebar: nested workspace groups, working/finished agent dots, collapse
-// that keeps active work visible, and Active/Favorites filters.
+// cmux-sidebar: nested workspace groups, working/finished agent dots, a
+// recently-finished clock, title colors and important (red) workspaces,
+// collapse that keeps active work visible, and Active/Favorites filters.
 //
 // Forked from manaflow-ai/cmux Examples/CustomSidebars/workspaces.js. The
 // whole sidebar is ONE flat drag surface: group headers and workspace rows
@@ -114,6 +115,35 @@ const WORKING_ORANGE = "#FF8A00";
 const FINISHED_GREEN = "#30D158";
 // Favorites are cmux's native pin, marked with a red bookmark.
 const FAVORITE_RED = "#FF453A";
+// The title is drawn in the native cmux workspace color (Title Color in the
+// row menu), so it persists and the built-in sidebar shows it as a border.
+// Important is that color set to red: the row keeps its place, unlike a
+// favorite's pin. Either red counts: this sidebar's, and cmux's named Red.
+const IMPORTANT_RED = "#FF453A";
+const IMPORTANT_COLORS = new Set([IMPORTANT_RED, "#C0392B"]);
+
+// Optimistic color: a pick shows the same frame; clears once the data agrees.
+const colorOverride = new Map(); // id -> "#RRGGBB", or "" for none
+const [colorTick, setColorTick] = signal(0);
+
+function colorOf(w) {
+  colorTick();
+  if (!w) return "";
+  const color = String(w.color ?? "").toUpperCase();
+  if (colorOverride.has(w.id)) {
+    if (colorOverride.get(w.id) === color) colorOverride.delete(w.id); // caught up
+    else return colorOverride.get(w.id);
+  }
+  return color;
+}
+
+const isImportant = (w) => IMPORTANT_COLORS.has(colorOf(w));
+// null: the default title color.
+const titleColor = (w) => (isImportant(w) ? IMPORTANT_RED : colorOf(w) || null);
+
+// A finished turn keeps its clock this long. Only time clears it: opening
+// the workspace, a new turn, or marking it important never do.
+const RECENT_SECONDS = 60 * 60;
 
 const isWorking = (w) =>
   !!w && (w.agents || []).some((a) => a.status === "working" || (a.children || []).some((c) => c.running));
@@ -130,6 +160,12 @@ function activityDot(state, gap = 0) {
   if (gap) dot.paddingTrailing(gap);
   return dot.frame({ width: 14 + gap, height: 14 });
 }
+
+// The recently-finished clock. `CLOCK_SLOT` is its width plus the gap after
+// it; the gap clears a favorite's bookmark, which overhangs its own frame.
+// An outline glyph, so it never reads as the solid green dot.
+const CLOCK_SLOT = 18;
+const recentClock = () => Image("clock").font(10).weight("semibold").color(FINISHED_GREEN);
 
 // --- optimistic UI -------------------------------------------------------------
 // Every user action flips local state the same frame; the cmux command runs
@@ -171,29 +207,71 @@ function selectWorkspace(id) {
   }
 }
 
-// Finished-and-unseen tracking. cmux exposes no "last opened" time, so the
-// sidebar watches each workspace go from working to not working itself. The
-// set lives in memory: it starts empty whenever the sidebar mounts (sessions
-// that finished before then show no dot).
-const finished = new Set();
+// Finished tracking. cmux exposes no "last opened" or "turn ended" time, so
+// the sidebar watches each workspace go from working to not working itself,
+// in memory. That memory is lost whenever the sidebar mounts (cmux launch, a
+// reload, a source edit, a sidebar switch): the green dot starts empty then,
+// and the clock falls back to what the data can tell (see answeredAt).
+const finished = new Set(); // finished, not opened since: the green dot
+const finishedAt = new Map(); // id -> wall time of its last observed finish
+const recent = new Set(); // finished under RECENT_SECONDS ago: the clock
 let wasWorking = new Set();
-const finishedVersion = computed(() => {
+
+// Wall time in epoch seconds. Stamps and expiry use it, never the host's
+// clock key, which is only as fresh as the last data push.
+const wallNow = () => Date.now() / 1000;
+
+// A recent finish as the data records it, so a clock survives a mount: a
+// prompt submitted under an hour ago that a stopped agent (idle, or asking
+// for input) was active after. Ended agents don't count, and neither does an
+// older prompt: a session that starts or quits bumps its activity without
+// answering anything. Null when the data can't tell. The tracker adopts it
+// as a stamp, because the next prompt hides it from the data again.
+function answeredAt(w, now) {
+  if (!w.latestAt || now - w.latestAt >= RECENT_SECONDS) return null;
+  let at = null;
+  for (const a of w.agents || []) {
+    if (a.status !== "idle" && a.status !== "needs_input") continue;
+    if (a.lastActivityAt > w.latestAt && (at === null || a.lastActivityAt > at)) at = a.lastActivityAt;
+  }
+  return at;
+}
+
+// The host's clock key changes about once a second; this notifies once a
+// minute, so a clock outlives its hour by under a minute and the ticks in
+// between cost nothing.
+const minute = memo(() => Math.floor((data.clock()?.epoch ?? 0) / 60));
+const [finishedVersion, setFinishedVersion] = signal("");
+const [recentVersion, setRecentVersion] = signal("");
+computed(() => {
   const ws = wsList();
+  minute();
+  const now = wallNow();
   const working = new Set();
   const present = new Set();
+  recent.clear();
   for (const w of ws) {
     present.add(w.id);
     if (isWorking(w)) {
       working.add(w.id);
       finished.delete(w.id);
-    } else if (wasWorking.has(w.id) && !isSelected(w)) {
-      finished.add(w.id);
+    } else if (wasWorking.has(w.id)) {
+      finishedAt.set(w.id, now);
+      if (!isSelected(w)) finished.add(w.id);
     }
     if (isSelected(w)) finished.delete(w.id); // opened: seen
+    // The later of the observed and the recorded finish wins.
+    const told = answeredAt(w, now);
+    let at = finishedAt.get(w.id) ?? null;
+    if (told !== null && (at === null || told > at)) finishedAt.set(w.id, (at = told));
+    if (at !== null && now - at < RECENT_SECONDS) recent.add(w.id);
   }
   for (const id of finished) if (!present.has(id)) finished.delete(id);
+  // Only time drops a stamp: a workspace missing from one data push keeps it.
+  for (const [id, at] of finishedAt) if (now - at >= RECENT_SECONDS) finishedAt.delete(id);
   wasWorking = working;
-  return Array.from(finished).sort().join(",");
+  setFinishedVersion(Array.from(finished).sort().join(","));
+  setRecentVersion(Array.from(recent).sort().join(","));
 });
 
 // "working" | "finished" | null
@@ -203,8 +281,16 @@ function activity(w) {
   return finishedVersion() && finished.has(w.id) ? "finished" : null;
 }
 const isActive = (w) => activity(w) !== null;
+// Finished under an hour ago; unlike the green dot, opening keeps it.
+const isRecent = (w) => !!w && !!recentVersion() && recent.has(w.id);
 
-const closedOverride = new Set();
+// Closed rows hide at once. cmux refuses a plain workspace.close for a pinned
+// (favorite) workspace or one with a live process, so the sidebar unpins and
+// forces: closing from here never asks. A row cmux still lists CLOSE_GRACE
+// seconds after its close shows again, rather than staying hidden until the
+// sidebar remounts and then "coming back".
+const CLOSE_GRACE = 5;
+const closedOverride = new Map(); // id -> clock epoch of the close
 const [closeTick, setCloseTick] = signal(0);
 
 // Optimistic tabs order: a bulk drop rearranges rows locally the same frame
@@ -222,8 +308,16 @@ function visibleWorkspaces() {
   orderTick();
   let ws = wsList();
   const present = new Set(ws.map((w) => w.id));
-  for (const id of closedOverride) if (!present.has(id)) closedOverride.delete(id); // caught up
-  if (closedOverride.size) ws = ws.filter((w) => !closedOverride.has(w.id));
+  if (closedOverride.size) {
+    // Subscribes to the clock only while a close is pending, so the grace
+    // ends without waiting for other data to change.
+    data.clock();
+    const t = wallNow();
+    for (const [id, at] of closedOverride) {
+      if (!present.has(id) || t - at >= CLOSE_GRACE) closedOverride.delete(id); // caught up, or refused
+    }
+    ws = ws.filter((w) => !closedOverride.has(w.id));
+  }
   if (orderOverride) {
     const actual = ws.map((w) => w.id).join(",");
     const wanted = orderOverride.filter((id) => present.has(id) && !closedOverride.has(id)).join(",");
@@ -238,14 +332,17 @@ function visibleWorkspaces() {
 }
 
 function closeWorkspace(id) {
-  closedOverride.add(id);
+  closedOverride.set(id, wallNow());
   setCloseTick(closeTick() + 1);
-  cmux("workspace.close", { workspace_id: id });
+  if (wsSig(id)()?.pinned) cmux("workspace.action", { action: "unpin", workspace_id: id });
+  cmux("workspace.close", { workspace_id: id, force: true });
 }
 
-// Multi-select: Cmd-click toggles, Shift-click extends from the last click
-// over the visible row order, plain click clears. The selection drives the
-// context menu's bulk actions (group together, move, close).
+// Multi-select: Cmd-click toggles, Shift-click selects a range over the
+// visible row order, plain click clears. The range starts at the last click
+// while a multi-selection is open, else at the open workspace (so it works
+// right after a reload or a switch made outside the sidebar). The selection
+// drives the context menu's bulk actions (group together, move, close).
 const multiSelected = new Set();
 const [multiTick, setMultiTick] = signal(0);
 let lastClickedId = null;
@@ -272,14 +369,15 @@ function handleRowClick(w, payload) {
     if (multiSelected.has(id)) multiSelected.delete(id);
     else multiSelected.add(id);
     setMultiTick(multiTick() + 1);
-  } else if (payload && payload.shift && lastClickedId) {
+  } else if (payload && payload.shift) {
+    const from = multiSelected.size && lastClickedId ? lastClickedId : selectOverride || selectedId();
     const order = visibleRowIds();
-    const a = order.indexOf(lastClickedId);
+    const a = order.indexOf(from);
     const b = order.indexOf(id);
-    if (a >= 0 && b >= 0) {
-      for (const rid of order.slice(Math.min(a, b), Math.max(a, b) + 1)) multiSelected.add(rid);
-      setMultiTick(multiTick() + 1);
-    }
+    // An anchor that is not a visible row (a header, or filtered out) starts
+    // the range at the clicked row.
+    for (const rid of order.slice(Math.min(a < 0 ? b : a, b), Math.max(a, b) + 1)) multiSelected.add(rid);
+    setMultiTick(multiTick() + 1);
   } else {
     clearMultiSelect();
     selectWorkspace(id);
@@ -295,14 +393,28 @@ function bulkIds(w) {
   return w ? [w.id] : [];
 }
 
-// Border Color sets the native cmux workspace color (shown by the built-in
-// sidebar); this sidebar does not draw it.
-function setBorderColor(id, color) {
+// ⌘W can't close the multi-selection: a custom sidebar gets no key events,
+// and ⌘W is cmux's Close Tab. The top bar shows a Close N chip instead.
+const multiCount = memo(() => {
+  multiTick();
+  return multiSelected.size;
+});
+
+function closeSelected() {
+  for (const id of Array.from(multiSelected)) closeWorkspace(id);
+  clearMultiSelect();
+}
+
+// Sets (or, for null, clears) the native workspace color: the title color.
+function setColor(id, color) {
+  colorOverride.set(id, color ?? "");
+  setColorTick(colorTick() + 1);
   if (color) cmux("workspace.action", { action: "set_color", workspace_id: id, color });
   else cmux("workspace.action", { action: "clear_color", workspace_id: id });
 }
 
-const BORDER_COLORS = [
+// Bright enough to read as text on light and dark sidebars.
+const TITLE_COLORS = [
   ["Red", "#FF453A"],
   ["Orange", "#FF9F0A"],
   ["Yellow", "#FFD60A"],
@@ -710,7 +822,9 @@ const emptyMessage = memo(() => {
   return filterActive() ? "No active workspaces" : "No favorite workspaces";
 });
 
-function filterChip(label, isOn, toggle, icon) {
+// Priority 1 keeps a chip's label whole: without it the bar's Spacer wins
+// and the label truncates even when the bar has room.
+function barChip(label, isOn, toggle, icon) {
   return HStack({ spacing: 4 }, [
     icon,
     Text(label).font(11).weight("medium").lineLimit(1)
@@ -721,24 +835,33 @@ function filterChip(label, isOn, toggle, icon) {
     .cornerRadius(9)
     .background(memo(() => (isOn() ? "#7f7f7f3d" : null)))
     .hoverBackground(memo(() => (isOn() ? "#7f7f7f3d" : "#7f7f7f24")))
+    .layoutPriority(1)
     .onTap(toggle);
 }
 
 function filterBar() {
   return HStack({ spacing: 6 }, [
-    filterChip(
+    barChip(
       memo(() => "Active · " + activeCount()),
       filterActive,
       () => setFilterActive(!filterActive()),
       Circle({ size: 7 }).fill(WORKING_ORANGE),
     ),
-    filterChip(
+    barChip(
       memo(() => "Favorites · " + favoriteCount()),
       filterFavorites,
       () => setFilterFavorites(!filterFavorites()),
       Image("bookmark.fill").font(9).color(FAVORITE_RED),
     ),
     Spacer(),
+    // Mounted only while 2+ rows are selected.
+    ForEach({ items: memo(() => (multiCount() > 1 ? ["close"] : [])), key: (k) => k }, () =>
+      barChip(
+        memo(() => "Close " + multiCount()),
+        () => false,
+        closeSelected,
+        Image("xmark").font(8).weight("bold").color("secondary"),
+      )),
   ])
     .paddingLeading(4)
     .paddingBottom(2);
@@ -947,6 +1070,7 @@ function workspaceMenu(w) {
   const count = memo(() => bulkIds(w()).length);
   const pinned = memo(() => !!w()?.pinned);
   const unread = memo(() => w()?.unread > 0);
+  const important = memo(() => isImportant(w()));
   return [
     Button(memo(() => (count() > 1 ? "New Group from " + count() + " Workspaces" : "New Group with This")), () => {
       cmux("workspace.group.create", {
@@ -961,6 +1085,9 @@ function workspaceMenu(w) {
     // sidebar agrees.
     Button(memo(() => (pinned() ? "Unfavorite" : "Favorite")), () =>
       cmux("workspace.action", { action: w()?.pinned ? "unpin" : "pin", workspace_id: w().id })),
+    // Important is Title Color red: it persists and never reorders.
+    Button(memo(() => (important() ? "Unmark Important" : "Mark as Important")), () =>
+      setColor(w().id, isImportant(w()) ? null : IMPORTANT_RED)),
     Button(memo(() => (unread() ? "Mark as Read" : "Mark as Unread")), () =>
       cmux("workspace.action", { action: w()?.unread > 0 ? "mark_read" : "mark_unread", workspace_id: w().id })),
     Divider(),
@@ -971,10 +1098,15 @@ function workspaceMenu(w) {
     ]),
     Menu("Move to Group", [groupItems]),
     Button("Remove from Group", () => cmux("workspace.group.remove", { workspace_id: w().id })),
-    Menu("Border Color", [
-      ...BORDER_COLORS.map(([label, hex]) => Button(label, () => setBorderColor(w().id, hex))),
-      Divider(),
-      Button("None", () => setBorderColor(w().id, null)),
+    // Applies to the whole multi-selection when this row is part of it.
+    Menu("Title Color", [
+      ...[...TITLE_COLORS, ["None", null]].flatMap(([label, hex]) => [
+        ...(hex ? [] : [Divider()]),
+        Button(label, () => {
+          for (const id of bulkIds(w())) setColor(id, hex);
+          clearMultiSelect();
+        }),
+      ]),
     ]),
     Divider(),
     Button("Close Others", act("close_others")).destructive(),
@@ -997,12 +1129,14 @@ function workspaceRow(w, e) {
   const pinned = memo(() => !!w()?.pinned);
   const crumb = memo(() => e().crumb);
   const state = memo(() => activity(w()));
-  // Dot, favorite bookmark, and breadcrumb mount only while shown: every
-  // mounted node costs the host work on each scroll frame, and most rows
-  // show none of them. A row without a dot keeps its slot as leading
-  // padding, so titles stay aligned.
+  const recentShown = memo(() => isRecent(w()));
+  const color = memo(() => titleColor(w()));
+  // Dot, clock, favorite bookmark, and breadcrumb mount only while shown:
+  // every mounted node costs the host work on each scroll frame, and most
+  // rows show none of them. A row without a dot keeps its slot as leading
+  // padding, so titles and clocks stay aligned.
   const leading = memoJSON(() =>
-    [state() && "dot", pinned() && "pin", crumb() && "crumb"].filter(Boolean),
+    [state() && "dot", recentShown() && "clock", pinned() && "pin", crumb() && "crumb"].filter(Boolean),
   );
   const badge = memoJSON(() => (unread() > 0 ? ["badge"] : []));
   // The title owns the FULL row width; badge and close button FLOAT over its
@@ -1016,6 +1150,8 @@ function workspaceRow(w, e) {
       // Text), so a long breadcrumb and title still share truncation.
       ForEach({ items: leading, key: (k) => k, layoutPriority: 1 }, (_, k) => {
         if (k === "dot") return activityDot(state, ROW_DOT_SLOT - 14);
+        // Green clock: the turn finished under an hour ago.
+        if (k === "clock") return recentClock().frame({ width: CLOCK_SLOT }).paddingTrailing(CLOCK_SLOT - 12);
         // Red bookmark on favorites.
         if (k === "pin") return Image("bookmark.fill").font(10).color(FAVORITE_RED).frame({ width: 9 }).paddingTrailing(5);
         // Dim "B › C ›" path for a row shown away from its group.
@@ -1025,7 +1161,7 @@ function workspaceRow(w, e) {
         .font(13)
         .lineLimit(1)
         .truncation("tail")
-        .color(memo(() => (selected() ? "primary" : "secondary"))),
+        .color(memo(() => color() ?? (selected() ? "primary" : "secondary"))),
     ])
       .frame({ maxWidth: "infinity" }),
     ZStack({}, [
@@ -1100,6 +1236,10 @@ function groupHeader(entry, e) {
   const anchor = () => (anchorId() ? wsSig(anchorId())() : undefined);
   const selected = memo(() => isSelected(anchor()));
   const state = memo(() => activity(anchor()));
+  const recentShown = memo(() => isRecent(anchor()));
+  // The anchor's dot and clock mount only while shown, like a row's.
+  const marks = memoJSON(() => [state() && "dot", recentShown() && "clock"].filter(Boolean));
+  const dotInset = memo(() => (state() ? 18 : 0));
   // Menu actions resolve the node at click time (the tree rebuilds per tick).
   const withNode = (fn) => () => {
     const node = nodeByKey(nodeKey);
@@ -1117,14 +1257,15 @@ function groupHeader(entry, e) {
       .rotation(memo(() => (e().collapsed ? 0 : 90)))
       .frame({ width: 14, height: 16 })
       .onTap(toggle),
-    // The anchor's own glyph overlays a leading inset that only opens while
-    // it runs. The host auto-boosts only a bare truncating Text over sibling
-    // Spacers, so the wrapper needs the boost explicitly.
+    // The anchor's own dot and clock overlay a leading inset that only opens
+    // while they show. The host auto-boosts only a bare truncating Text over
+    // sibling Spacers, so the wrapper needs the boost explicitly.
     ZStack({ alignment: "leading" }, [
       Text(memo(() => e().leaf)).font(12).weight("semibold").lineLimit(1).truncation("tail")
         .color(memo(() => (selected() ? "primary" : "secondary")))
-        .paddingLeading(memo(() => (state() ? 18 : 0))),
-      activityDot(state),
+        .paddingLeading(memo(() => dotInset() + (recentShown() ? CLOCK_SLOT : 0))),
+      ForEach({ items: marks, key: (k) => k }, (_, k) =>
+        (k === "dot" ? activityDot(state) : recentClock().paddingLeading(dotInset))),
     ]).layoutPriority(1),
     Spacer(),
     // Hover-revealed `+`, styled like the row close button. Virtual headers

@@ -57,6 +57,15 @@ describe("scene op budget", () => {
     );
     assert.equal(ops.length, 0);
   });
+
+  test("clock ticks cost nothing while a clock icon is shown", () => {
+    const at = (now, status) => ({ ...big({ "T0#2": { agents: [agent(status, { id: "s-T0#2" })] } }), now });
+    const sb = mountSidebar(at(0, "working"));
+    sb.setData(at(0, "idle"));
+    for (const now of [1, 59, 60, 3599]) {
+      assert.equal(sb.opsDuring(() => sb.setData(at(now, "idle"))).length, 0, `at ${now}s`);
+    }
+  });
 });
 
 describe("scene node budget", () => {

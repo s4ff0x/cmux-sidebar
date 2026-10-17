@@ -92,8 +92,13 @@ export function mountSidebar(state) {
   });
   vm.runInContext(fs.readFileSync(RUNTIME_PATH, "utf8"), ctx, { filename: "SidebarRuntime.js" });
 
-  const setData = ({ workspaces: ws = [], groups = [] }) => {
+  // `now` is the wall time in epoch seconds (Date.now in the sidebar) and,
+  // unless `clock` says otherwise, the host's clock key. Both go in first, so
+  // a turn that ends in this push is stamped with this push's time.
+  const setData = ({ workspaces: ws = [], groups = [], now = 0, clock = now }) => {
     const selected = ws.find((w) => w.selected);
+    vm.runInContext(`Date.now = () => ${now * 1000};`, ctx);
+    ctx.__setData("clock", JSON.stringify({ epoch: clock }));
     ctx.__setData("workspaces", JSON.stringify(ws));
     ctx.__setData("groups", JSON.stringify(groups));
     ctx.__setData("selectedId", JSON.stringify(selected ? selected.id : ""));
@@ -155,7 +160,20 @@ export function mountSidebar(state) {
         return findDeep(n.id, (x) => x.type === "image" && x.props.systemName === "bookmark.fill", { skipHidden: true })
           .some((x) => x.props.width !== 0 && x.props.color === "#FF453A");
       },
-      // The selected (or multi-selected) row paints a resting background.
+      // The green clock of a turn that finished under an hour ago.
+      recent() {
+        return findDeep(n.id, (x) => x.type === "image" && x.props.systemName === "clock", { skipHidden: true }).length > 0;
+      },
+      // An important workspace's title is red.
+      important() {
+        return findDeep(n.id, (x) => x.type === "text" && x.props.color === "#FF453A", { skipHidden: true }).length > 0;
+      },
+      // The color a visible text is drawn in ("secondary", "#0A84FF", ...).
+      textColor(text) {
+        const found = findDeep(n.id, (x) => x.type === "text" && x.props.text === text, { skipHidden: true })[0];
+        if (!found) throw new Error(`no text "${text}"`);
+        return found.props.color;
+      },
       highlighted: !!n.props.background,
       texts: visibleTexts,
       text: visibleTexts.join(" "),
@@ -196,14 +214,18 @@ export function mountSidebar(state) {
     };
   };
 
+  // The top bar of chips: the root's first child.
+  const barId = () => node(rootId).children[0];
+
   // The tree (the Reorderable, with drag keys) followed by the empty-filter
-  // message: the top-level ForEach groups outside the Reorderable (rows have
-  // ForEach groups of their own inside).
+  // message: the top-level ForEach groups outside the Reorderable and the top
+  // bar (rows have ForEach groups of their own inside).
   const listGroups = () => {
     const out = [];
+    const bar = barId();
     const walk = (nid) => {
       const n = node(nid);
-      if (!n || n.type === "contextMenu" || n.type === "reorderable") return;
+      if (!n || nid === bar || n.type === "contextMenu" || n.type === "reorderable") return;
       if (n.type === "group") {
         out.push(n);
         return;
@@ -224,14 +246,10 @@ export function mountSidebar(state) {
   const textsOf = (n) =>
     findDeep(n.id, (x) => x.type === "text" && x.props.text, { skipHidden: true }).map((x) => x.props.text);
 
-  // The filter chips at the top: tappable nodes outside the lists.
-  const chipNodes = () => {
-    const inLists = new Set(findDeep(rootId, (n) => n.type === "reorderable" || n.type === "group")
-      .flatMap((n) => findDeep(n.id, () => true).map((x) => x.id)));
-    return findDeep(rootId, (n) => n.props.tappable === true && !inLists.has(n.id));
-  };
+  // The chips in the top bar (filters, and Close N while rows are selected).
+  const chipNodes = () => findDeep(barId(), (n) => n.props.tappable === true);
 
-  // A filter chip by the start of its label ("Active", "Favorites").
+  // A chip by the start of its label ("Active", "Favorites", "Close").
   const chip = (label) => {
     const found = chipNodes().find((n) => textsOf(n).join(" ").startsWith(label));
     if (!found) throw new Error(`no chip "${label}"`);
