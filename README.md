@@ -60,6 +60,11 @@ badge, multi-select (⌘-click / ⇧-click), Close Others, and drag-and-drop.
   click; right-click a selected row → **Close N Workspaces** does the same. ⌘W cannot: cmux sends
   custom sidebars no key events, and ⌘W is cmux's own **Close Tab**, which closes the focused
   terminal tab.
+- **Bulk close is one step.** Closing several workspaces hides them all at once. Until cmux has
+  closed every one, a spinner shows in the top bar and the list stays still and dimmed, ignoring
+  clicks and drags, so rows never vanish one by one or jump. If the open workspace is among
+  them, the nearest remaining row opens first. A workspace cmux still lists after 30 seconds
+  shows again.
 - **Closing never asks.** cmux refuses a plain close for a favorite (pinned) workspace or one
   with a running process, so a close from this sidebar (✕, menu, or chip) unpins the favorite
   and forces the close. That ends whatever runs in the workspace, an agent included, without a

@@ -842,6 +842,68 @@ describe("multi-select", () => {
   });
 });
 
+describe("bulk close", () => {
+  const all = [["w1", "one"], ["w2", "two"], ["w3", "three"], ["w4", "four"]];
+  // `gone`: ids cmux has closed; `extra`: rows that appeared since.
+  const state = (now, { open = "w1", gone = [], extra = [] } = {}) => ({
+    now,
+    workspaces: workspaces(
+      ...[...all, ...extra].filter(([id]) => !gone.includes(id)).map(([id, title]) => ({ id, title, selected: id === open })),
+    ),
+  });
+  const closeTwoAndFour = (sb) => {
+    sb.row("two").tap({ cmd: true });
+    sb.row("four").tap({ cmd: true });
+    sb.chip("Close").tap();
+  };
+
+  test("rows hide at once, and the list holds still and dims under a spinner until all are gone", () => {
+    const sb = mountSidebar(state(0));
+    closeTwoAndFour(sb);
+    assert.deepEqual([sb.outline(), sb.spinner(), sb.listOpacity()], [["one", "three"], true, 0.5]);
+    // One closed, and a new workspace appeared: the list doesn't move.
+    sb.setData(state(1, { gone: ["w2"], extra: [["w5", "five"]] }));
+    assert.deepEqual([sb.outline(), sb.spinner()], [["one", "three"], true]);
+    // Past the single-close grace, the slow one stays hidden.
+    sb.setData(state(7, { gone: ["w2"], extra: [["w5", "five"]] }));
+    assert.deepEqual(sb.outline(), ["one", "three"]);
+    sb.setData(state(8, { gone: ["w2", "w4"], extra: [["w5", "five"]] }));
+    assert.deepEqual([sb.outline(), sb.spinner(), sb.listOpacity()], [["one", "three", "five"], false, 1]);
+  });
+
+  test("rows cmux keeps show again when the bulk close times out", () => {
+    const sb = mountSidebar(state(0));
+    closeTwoAndFour(sb);
+    sb.setData(state(29));
+    assert.deepEqual(sb.outline(), ["one", "three"]);
+    sb.setData(state(30));
+    assert.deepEqual(sb.outline(), ["one", "two", "three", "four"]);
+    assert.equal(sb.spinner(), false);
+  });
+
+  test("closing the open workspace in bulk first opens its nearest surviving row", () => {
+    const sb = mountSidebar(state(0, { open: "w2" }));
+    sb.row("two").tap({ cmd: true });
+    sb.row("three").tap({ cmd: true });
+    sb.chip("Close").tap();
+    assert.deepEqual(sb.take().map((a) => [a.method, a.params.workspace_id]), [
+      ["workspace.select", "w4"],
+      ["workspace.close", "w2"],
+      ["workspace.close", "w3"],
+    ]);
+  });
+
+  test("clicks and drags do nothing while it runs", () => {
+    const sb = mountSidebar(state(0));
+    closeTwoAndFour(sb);
+    sb.take();
+    sb.row("three").tap();
+    sb.row("three").tapImage("xmark");
+    sb.drop("w3", 0);
+    assert.deepEqual([sb.take(), sb.outline()], [[], ["one", "three"]]);
+  });
+});
+
 describe("filters", () => {
   // tree3 with B collapsed, c1 working, b1 finished (working -> idle), and
   // a1 a favorite.

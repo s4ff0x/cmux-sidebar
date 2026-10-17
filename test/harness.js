@@ -287,6 +287,10 @@ export function mountSidebar(state) {
     rows,
     row,
     chip,
+    // Whether the top bar shows the bulk-close spinner.
+    spinner: () => findDeep(barId(), (n) => n.type === "progress").length > 0,
+    // The list's opacity: dimmed while a bulk close runs.
+    listOpacity: () => list().props.opacity ?? 1,
     // Visible rows as "label" strings, indented two spaces per 14pt level.
     outline: () => rows().map((r) => " ".repeat((r.indent / 14) * 2) + (r.editing !== null ? `[${r.editing}]` : r.text)),
     actions,

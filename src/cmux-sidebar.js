@@ -165,7 +165,9 @@ function activityDot(state, gap = 0) {
 // it; the gap clears a favorite's bookmark, which overhangs its own frame.
 // An outline glyph, so it never reads as the solid green dot.
 const CLOCK_SLOT = 18;
-const recentClock = () => Image("clock").font(10).weight("semibold").color(FINISHED_GREEN);
+// paddingTop lowers the glyph 1.5pt in its centered slot, onto the title's
+// optical center.
+const recentClock = () => Image("clock").font(10).weight("semibold").color(FINISHED_GREEN).paddingTop(3);
 
 // --- optimistic UI -------------------------------------------------------------
 // Every user action flips local state the same frame; the cmux command runs
@@ -306,7 +308,8 @@ function setOrderOverride(ids) {
 function visibleWorkspaces() {
   closeTick();
   orderTick();
-  let ws = wsList();
+  // A bulk close freezes the list it started from (see closeMany).
+  let ws = bulkClose()?.ws ?? wsList();
   const present = new Set(ws.map((w) => w.id));
   if (closedOverride.size) {
     // Subscribes to the clock only while a close is pending, so the grace
@@ -332,11 +335,59 @@ function visibleWorkspaces() {
 }
 
 function closeWorkspace(id) {
+  if (bulkClose()) return;
   closedOverride.set(id, wallNow());
   setCloseTick(closeTick() + 1);
+  sendClose(id);
+}
+
+function sendClose(id) {
   if (wsSig(id)()?.pinned) cmux("workspace.action", { action: "unpin", workspace_id: id });
   cmux("workspace.close", { workspace_id: id, force: true });
 }
+
+// Bulk close is one loading state, not rows closing one by one: the closing
+// rows hide at once, and the tree's inputs (workspace and group lists)
+// freeze as they will be after, so nothing moves while cmux works through
+// the closes and moves its selection. The top bar shows a spinner, and
+// the list dims and ignores clicks and drags. It ends when every workspace
+// is gone from the data, or after BULK_CLOSE_TIMEOUT seconds; any cmux kept
+// then shows again.
+const BULK_CLOSE_TIMEOUT = 30;
+const [bulkClose, setBulkClose] = signal(null); // { ids, until, ws, groups }
+
+function closeMany(ids) {
+  if (bulkClose()) return;
+  if (ids.length < 2) {
+    for (const id of ids) closeWorkspace(id);
+    return;
+  }
+  const closing = new Set(ids);
+  // Open the nearest surviving row first, so cmux has nothing to pick (and
+  // no collapsed group to expand) when the open workspace closes.
+  const open = selectOverride || selectedId();
+  if (closing.has(open)) {
+    const order = visibleRowIds();
+    const at = order.indexOf(open);
+    const next = order.slice(at + 1).find((id) => !closing.has(id))
+      ?? order.slice(0, Math.max(at, 0)).reverse().find((id) => !closing.has(id));
+    if (next) selectWorkspace(next);
+  }
+  setBulkClose({
+    ids: closing,
+    until: wallNow() + BULK_CLOSE_TIMEOUT,
+    ws: visibleWorkspaces().filter((w) => !closing.has(w.id)),
+    groups: groupsList(),
+  });
+  for (const id of ids) sendClose(id);
+}
+
+computed(() => {
+  const b = bulkClose();
+  if (!b) return;
+  data.clock(); // re-check the timeout every tick
+  if (!wsList().some((w) => b.ids.has(w.id)) || wallNow() >= b.until) setBulkClose(null);
+});
 
 // Multi-select: Cmd-click toggles, Shift-click selects a range over the
 // visible row order, plain click clears. The range starts at the last click
@@ -364,6 +415,7 @@ function visibleRowIds() {
 }
 
 function handleRowClick(w, payload) {
+  if (bulkClose()) return;
   const id = w.id;
   if (payload && payload.cmd) {
     if (multiSelected.has(id)) multiSelected.delete(id);
@@ -401,7 +453,7 @@ const multiCount = memo(() => {
 });
 
 function closeSelected() {
-  for (const id of Array.from(multiSelected)) closeWorkspace(id);
+  closeMany(Array.from(multiSelected));
   clearMultiSelect();
 }
 
@@ -522,7 +574,7 @@ const groupTree = computed(() => {
     byGroup.get(w.group).push(w);
   }
   const real = [];
-  for (const g of groupsList()) {
+  for (const g of bulkClose()?.groups ?? groupsList()) {
     const members = byGroup.get(g.id) ?? [];
     if (members.length === 0) continue;
     const anchor = members.find((w) => w.id === g.anchorId) ?? null;
@@ -854,14 +906,18 @@ function filterBar() {
       Image("bookmark.fill").font(9).color(FAVORITE_RED),
     ),
     Spacer(),
-    // Mounted only while 2+ rows are selected.
-    ForEach({ items: memo(() => (multiCount() > 1 ? ["close"] : [])), key: (k) => k }, () =>
-      barChip(
-        memo(() => "Close " + multiCount()),
-        () => false,
-        closeSelected,
-        Image("xmark").font(8).weight("bold").color("secondary"),
-      )),
+    // Close N while 2+ rows are selected; a spinner while a bulk close runs.
+    ForEach({ items: memo(() => (bulkClose() ? ["closing"] : multiCount() > 1 ? ["close"] : [])), key: (k) => k }, (_, k) =>
+      k === "closing"
+        // The host draws the regular 32pt spinner; a 16pt-tall frame keeps
+        // the bar's height, so the list below doesn't shift.
+        ? ProgressView().frame({ width: 32, height: 16 })
+        : barChip(
+          memo(() => "Close " + multiCount()),
+          () => false,
+          closeSelected,
+          Image("xmark").font(8).weight("bold").color("secondary"),
+        )),
   ])
     .paddingLeading(4)
     .paddingBottom(2);
@@ -873,6 +929,7 @@ function filterBar() {
 // row above (e.g. last item of a group), "below" with the row below (right
 // after the group, outside it) - chosen by the pointer's X position mid-drag.
 function handleMove(id, index, extra) {
+  if (bulkClose()) return; // the list is frozen; its slots map to nothing
   if (id.startsWith("h:")) {
     moveGroup(id, index, extra && extra.side);
     return;
@@ -1111,7 +1168,7 @@ function workspaceMenu(w) {
     Divider(),
     Button("Close Others", act("close_others")).destructive(),
     Button(memo(() => (count() > 1 ? "Close " + count() + " Workspaces" : "Close")), () => {
-      for (const id of bulkIds(w())) closeWorkspace(id);
+      closeMany(bulkIds(w()));
       clearMultiSelect();
     }).destructive(),
   ];
@@ -1288,7 +1345,7 @@ function groupHeader(entry, e) {
     .background(memo(() => (selected() ? "#7f7f7f3d" : null)))
     .hoverBackground(memo(() => (selected() ? "#7f7f7f3d" : "#7f7f7f1c")))
     .frame({ maxWidth: "infinity" })
-    .onTap(() => selectWorkspace(anchor()?.id))
+    .onTap(() => bulkClose() || selectWorkspace(anchor()?.id))
     .onDoubleTap(() => setEditingId(hid))
     .contextMenu(groupMenu(entry, e, g, withNode, toggle));
 }
@@ -1404,7 +1461,7 @@ sidebar(() =>
         onMove: handleMove,
       },
       entryRow,
-    ),
+    ).opacity(memo(() => (bulkClose() ? 0.5 : 1))),
     // The empty-filter message.
     VStack({ spacing: 2 }, [
       ForEach(
